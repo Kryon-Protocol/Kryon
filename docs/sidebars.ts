@@ -8,6 +8,7 @@ const sidebars: SidebarsConfig = {
       label: "Architecture",
       collapsed: false,
       items: [
+        "architecture/overview",
         "architecture/protocol",
         "architecture/contracts",
         "architecture/frontend",
