@@ -39,7 +39,7 @@ important thing on the page:
 | ⚪ White | Operator-signed settlement | Operator submits, but the **contract** validates |
 | 🟡 Amber | Oracle price flow | Quorum median, staleness-guarded |
 | ⚫ Dashed | State sync / reads | Read-only; cannot move funds |
-| 🔴 Pink | Liquidation & insurance | Permissionless trigger, capped reward |
+| 🔴 Red | Liquidation & insurance | Permissionless trigger, capped reward |
 
 If a line is not green, it cannot move a user's money without contract-enforced
 validation. That is the security claim the architecture exists to make.
