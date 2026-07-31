@@ -518,40 +518,6 @@ already sign for.
 
 ---
 
-## Ecosystem positioning
-
-Grounded in the Stellar project directory and SCF award data (retrieved
-2026-07-31). SCF has distributed **~$39.2M across 387 awarded projects**, mean
-award **~$101k**, with Build Awards up to **$150k** paid in three milestone
-tranches.
-
-Perpetuals/leverage prior art on Stellar:
-
-| Project | SCF award | Model | Status |
-| --- | --- | --- | --- |
-| **Zenex** (ex-Hermes) | $150,000 | Liquidity-pool + oracle pricing | Testnet, mainnet pending |
-| **Stellars Finance** | $119,300 (R40) | Pool-based perps | Live |
-| **Turbolong** | $99,000 (R43) | Recursive lending loops on Blend (not perps) | Live |
-| **Noether** | $86,200 (R41) | Pool/vault (NOE) + oracle pricing | Testnet |
-
-Two things stand out, and they are Kryon's positioning:
-
-1. **Every funded Stellar perps project uses a pool/oracle-priced model.** Kryon
-   is a **central limit order book** with price-time priority — real
-   counterparty-to-counterparty price discovery rather than trading against a
-   pool at an oracle mark.
-2. **The funded perps cohort is largely still on testnet.** Kryon settles on
-   **Stellar mainnet** against real USDC today.
-
-The patterns that repeat among SCF's most-funded projects are also instructive:
-the largest cumulative awards go to teams that become **primitives others build
-on** and return across rounds — Reflector ($444k / 4 rounds), Phoenix ($394k / 3),
-Soroswap ($346k / 3). Kryon's shared `risk-engine` and `protocol-core` crates, its
-guarded oracle adapter, and its settlement gateway are deliberately built as
-reusable Soroban derivatives infrastructure, not a closed application.
-
----
-
 ## Repository map
 
 ```
