@@ -2,6 +2,37 @@ import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV !== "production";
 
+/**
+ * WebSocket origins allowed by connect-src.
+ *
+ * The blanket `wss:` this replaced permitted a live-price connection to ANY
+ * host on the internet — the one directive that matters most here, since the
+ * feed drives the mark price a trader acts on. The origins are known at build
+ * time (they are the tunnel hostnames), so name them.
+ *
+ * Falls back to `wss:` when neither is configured: a deployment that has not
+ * set them would otherwise build a CSP that blocks its own feed, and silently
+ * degrading to REST polling is a worse failure than a broad directive.
+ */
+const wsOrigins = [
+  process.env.NEXT_PUBLIC_WS_URL_MAINNET,
+  process.env.NEXT_PUBLIC_WS_URL_TESTNET,
+  process.env.NEXT_PUBLIC_WS_URL,
+]
+  .filter((u): u is string => Boolean(u))
+  .map((u) => {
+    try {
+      return new URL(u).origin;
+    } catch {
+      return "";
+    }
+  })
+  .filter(Boolean);
+
+const wsConnectSrc = wsOrigins.length
+  ? [...new Set(wsOrigins)].join(" ")
+  : "wss:";
+
 const csp = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -13,7 +44,10 @@ const csp = [
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""} https://s3.tradingview.com`,
   "frame-src 'self' https://s.tradingview.com https://www.tradingview.com",
-  "connect-src 'self' https://api.binance.com https://*.tradingview.com wss://*.tradingview.com https://soroban-testnet.stellar.org https://soroban-mainnet.stellar.org https://mainnet.sorobanrpc.com https://horizon-testnet.stellar.org https://horizon.stellar.org wss:",
+  // Both networks' RPC and Horizon endpoints are listed: the navbar toggle
+  // serves both venues from one bundle, so a build for either must be able to
+  // reach the other's chain endpoints after a switch.
+  `connect-src 'self' https://api.binance.com https://*.tradingview.com wss://*.tradingview.com https://soroban-testnet.stellar.org https://soroban-mainnet.stellar.org https://mainnet.sorobanrpc.com https://horizon-testnet.stellar.org https://horizon.stellar.org ${wsConnectSrc}${isDev ? " ws://localhost:8080 ws://localhost:8081" : ""}`,
   "worker-src 'self' blob:",
 ].join("; ");
 
