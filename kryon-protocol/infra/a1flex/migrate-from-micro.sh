@@ -95,12 +95,19 @@ for tbl in Fill Order Position Market TxJob TraderStat; do
   OLD_N=$($SSH "sudo -u postgres psql -tAc 'SELECT count(*) FROM \"${tbl}\"' ${DB}" 2>/dev/null || echo "?")
   NEW_N=$(sudo -u postgres psql -tAc "SELECT count(*) FROM \"${tbl}\"" "${DB}" 2>/dev/null || echo "?")
   MARK=""
-  if [[ "$OLD_N" != "$NEW_N" ]]; then MARK="  ← MISMATCH"; DRIFT=1; fi
+  # An unreadable count on either side is a failure, not a match. Without this,
+  # a wrong table name makes both sides "?" — equal — and the script reports
+  # "all verified" having verified nothing.
+  if [[ "$OLD_N" == "?" || "$NEW_N" == "?" ]]; then
+    MARK="  ← UNREADABLE"; DRIFT=1
+  elif [[ "$OLD_N" != "$NEW_N" ]]; then
+    MARK="  ← MISMATCH"; DRIFT=1
+  fi
   printf '  %-22s %12s %12s%s\n' "$tbl" "$OLD_N" "$NEW_N" "$MARK"
 done
 
 if (( DRIFT )); then
-  die "row counts differ — do NOT terminate the old instance. Investigate first."
+  die "row counts differ or could not be read — do NOT terminate the old instance."
 fi
 ok "all verified table counts match"
 

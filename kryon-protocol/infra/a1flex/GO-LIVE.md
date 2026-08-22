@@ -297,8 +297,10 @@ ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/...   # from Phase 0
 Verify both databases answer before building:
 
 ```bash
-psql "postgresql://kryon:<PW>@localhost:5432/kryon_mainnet" -c 'SELECT count(*) FROM markets;'
-psql "postgresql://kryon:<PW>@localhost:5432/kryon_testnet" -c 'SELECT count(*) FROM markets;'
+# Table names are Prisma model names — PascalCase and quoted. Unquoted or
+# lowercase `markets` errors with "relation does not exist".
+psql "postgresql://kryon:<PW>@localhost:5432/kryon_mainnet" -c 'SELECT count(*) FROM "Market";'
+psql "postgresql://kryon:<PW>@localhost:5432/kryon_testnet" -c 'SELECT count(*) FROM "Market";'
 ```
 
 ---

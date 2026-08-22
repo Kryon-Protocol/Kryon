@@ -125,8 +125,8 @@ ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/...
 Sanity-check both databases before building:
 
 ```bash
-psql "$DATABASE_URL_MAINNET" -c 'SELECT count(*) FROM markets;'
-psql "$DATABASE_URL_TESTNET" -c 'SELECT count(*) FROM markets;'
+psql "$DATABASE_URL_MAINNET" -c 'SELECT count(*) FROM "Market";'
+psql "$DATABASE_URL_TESTNET" -c 'SELECT count(*) FROM "Market";'
 ```
 
 ---

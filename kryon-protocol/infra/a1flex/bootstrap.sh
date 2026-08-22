@@ -13,6 +13,7 @@ set -euo pipefail
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; }
 ok()   { printf '\033[0;32m  ✓ %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 PG_VERSION=16
 NODE_MAJOR=22
@@ -91,8 +92,20 @@ fi
 # ── PostgreSQL ───────────────────────────────────────────────────────────────
 log "PostgreSQL ${PG_VERSION}"
 if ! rpm -q "postgresql${PG_VERSION}-server" >/dev/null 2>&1; then
+  # The PGDG repo is required. Oracle Linux 9's own repos ship
+  # `postgresql-server` through a module stream; the versioned package names
+  # used here — and the /usr/pgsql-N/bin/ setup path below — are PGDG's. Without
+  # this the install fails with "No match for argument".
+  if ! rpm -q pgdg-redhat-repo >/dev/null 2>&1; then
+    sudo dnf install -y -q \
+      "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm" \
+      >/dev/null || die "could not add the PGDG repository"
+    ok "PGDG repository added"
+  fi
+  # Disable the built-in module or it shadows the PGDG packages.
   sudo dnf -qy module disable postgresql >/dev/null 2>&1 || true
-  sudo dnf install -y -q "postgresql${PG_VERSION}-server" "postgresql${PG_VERSION}-contrib" >/dev/null
+  sudo dnf install -y -q "postgresql${PG_VERSION}-server" "postgresql${PG_VERSION}-contrib" >/dev/null \
+    || die "postgresql${PG_VERSION} install failed"
   ok "postgresql${PG_VERSION} installed"
 else
   ok "postgresql${PG_VERSION} already installed"
@@ -108,8 +121,6 @@ else
   ok "data directory already initialised"
 fi
 
-# Tuning for 24GB. The old box used shared_buffers=96MB / work_mem=2MB because
-# it had 945MB total; those numbers are now pointlessly small.
 # Derived from the hardware, not hardcoded: an Always Free tenancy is often
 # capped below 4 OCPU / 24 GB (2/12 is common, and must be requested up), and a
 # 24GB profile on a 12GB box sets shared_buffers to half of RAM and an
@@ -199,18 +210,28 @@ for db in kryon_mainnet kryon_testnet; do
 done
 
 # ── Firewall ─────────────────────────────────────────────────────────────────
-# Host layer only. The VCN Security List is a SEPARATE layer and only the
-# console can change it — that mismatch is why 8080 was unreachable from July.
+# Nothing to open. Every service on this box is reached over loopback:
+# cloudflared connects to the ws-server on localhost:8080/8081 and to Next on
+# localhost:3000, then dials OUT to Cloudflare. Postgres is bound to localhost.
+#
+# This deliberately reverses the earlier instruction to open 8080/8081 at both
+# the host and VCN layers. That was correct when the web tier was remote and
+# needed a direct feed; with a tunnel it would publish the same feed a second
+# time, unencrypted as ws://, outside the tunnel's TLS and reachable by anyone.
 log "Firewall (host layer)"
-if systemctl is-active --quiet firewalld; then
-  for port in 8080 8081; do
-    sudo firewall-cmd --permanent --add-port=${port}/tcp >/dev/null 2>&1 || true
-  done
-  sudo firewall-cmd --reload >/dev/null 2>&1 || true
-  ok "opened 8080/tcp (mainnet ws) and 8081/tcp (testnet ws)"
-  warn "VCN Security List ingress for 8080+8081 must still be added in the console."
+if [[ "${WS_INGRESS:-0}" == "1" ]]; then
+  if systemctl is-active --quiet firewalld; then
+    for port in 8080 8081; do
+      sudo firewall-cmd --permanent --add-port=${port}/tcp >/dev/null 2>&1 || true
+    done
+    sudo firewall-cmd --reload >/dev/null 2>&1 || true
+    warn "opened 8080+8081 (WS_INGRESS=1) — the VCN Security List rule is a"
+    warn "separate layer and must be added in the console for these to matter."
+  else
+    warn "firewalld not active — skipping"
+  fi
 else
-  warn "firewalld not active — skipping"
+  ok "no ports opened — all traffic reaches this box through the tunnel"
 fi
 
 # ── Nightly backups ──────────────────────────────────────────────────────────
