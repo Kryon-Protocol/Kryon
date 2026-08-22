@@ -81,6 +81,54 @@ done
 
 ---
 
+## Phase 1.5 — Get your working system into git ⏱ 30 min
+
+**Verified 2026-08-23: `origin/main` does not contain the code your production
+system is actually running.** Missing from the remote entirely:
+
+| Missing from `origin/main` | Consequence if the VM deploys from it |
+|---|---|
+| `PUBLISH_TIME_BACKDATE_SECS` in `oracle-keeper.ts` | every oracle publish fails `Error(Contract, #6)` — the bug that silenced mainnet for 43 days |
+| `client/lib/sql.ts` (the `pg` shim) | nothing can talk to the self-hosted Postgres at all |
+| `client/features/network/*` | no network toggle, no degraded-venue banner |
+| `client/ecosystem.testnet.config.cjs` | no testnet fleet to start in Phase 10 |
+
+Plus 75 modified tracked files and 29 untracked ones on the laptop.
+
+Phase 3 clones the repo onto the new box from `origin/main`, and CD does
+`git reset --hard origin/main` on every deploy. **If you build the new box
+today, you build it from code that cannot publish prices and cannot reach the
+database.** The old box works only because it carries local edits that were
+never pushed.
+
+🧑 So, before Phase 2:
+
+```bash
+cd ~/Downloads/Kryon
+git status --short                    # review — 104 files
+git checkout -b main-sync             # or commit straight to main
+git add -A && git commit -m "..."     # split into coherent commits if you can
+git push origin HEAD
+```
+
+Then confirm the remote has what matters:
+
+```bash
+git show origin/main:client/scripts/oracle-keeper.ts | grep -c PUBLISH_TIME_BACKDATE_SECS   # want ≥1
+git cat-file -e origin/main:client/lib/sql.ts && echo "sql shim present"
+```
+
+**Also check the old box** — it may carry edits that exist nowhere else:
+
+```bash
+ssh -i ~/.ssh/kryon-vm-oracle.key opc@92.4.91.30 'cd ~/kryon && git status --short'
+```
+
+Anything listed there is running in production and exists in no repository.
+Copy it off before that instance is terminated in Phase 11.
+
+---
+
 ## Phase 2 — Create the A1.Flex box ⏱ 15 min, or days if capacity is short
 
 The 945 MB micro box **cannot** host the web tier — it is already at ~85% memory

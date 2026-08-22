@@ -117,6 +117,18 @@ jobs:
           ssh -i ~/.ssh/deploy.key -o BatchMode=yes "$VM_USER@$VM_HOST" \
             'set -euo pipefail
              cd ~/kryon
+             # REFUSE to reset over local modifications. The VM has historically
+             # carried fixes that never reached git — the PUBLISH_TIME_BACKDATE_SECS
+             # fix and the lib/sql.ts Postgres shim among them. A blind
+             # `reset --hard` would silently revert the running keepers to code
+             # whose every oracle publish fails with Error(Contract, #6), and
+             # which cannot talk to the local database at all.
+             if [ -n "$(git status --porcelain)" ]; then
+               echo "::error::Working tree on the VM is dirty. Commit and push those"
+               echo "changes before deploying, or they will be destroyed:"
+               git status --short
+               exit 1
+             fi
              git fetch --all --prune
              git reset --hard origin/main
              bash kryon-protocol/infra/a1flex/setup-web-tier.sh'
