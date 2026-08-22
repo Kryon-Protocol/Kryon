@@ -27,7 +27,11 @@ function canonicalPairs(pairs: Array<[string, string | number | boolean]>): stri
   return pairs.map(([k, v]) => `${k}=${String(v)}`).join("\n");
 }
 
-export function orderSigningMessage(o: OrderIntent | Omit<SignedOrderPayload, "signature">): string {
+/** See `cancelSigningMessage` on the `networkPassphrase` parameter. */
+export function orderSigningMessage(
+  o: OrderIntent | Omit<SignedOrderPayload, "signature">,
+  networkPassphrase: string = NETWORK.passphrase
+): string {
   const marketId = "marketId" in o ? o.marketId : o.market_id;
   const limitPrice = "limitPrice" in o ? o.limitPrice.toString() : o.limit_price;
   const reduceOnly = "reduceOnly" in o ? o.reduceOnly : o.reduce_only;
@@ -37,7 +41,7 @@ export function orderSigningMessage(o: OrderIntent | Omit<SignedOrderPayload, "s
   return canonicalPairs([
     ["domain", APP_DOMAIN],
     ["action", "place_order"],
-    ["network", NETWORK.passphrase],
+    ["network", networkPassphrase],
     ["owner", o.owner],
     ["market_id", marketId],
     ["is_long", isLong],
@@ -92,11 +96,22 @@ export function orderSettlementMessage(
   ].join("|");
 }
 
-export function cancelSigningMessage(owner: string, nonce: bigint | string): string {
+/**
+ * `networkPassphrase` binds the signature to one Stellar network, so a message
+ * signed for testnet can never be replayed against mainnet. It defaults to the
+ * active network, which is correct in the browser — but SERVER callers must
+ * pass the requesting network's passphrase explicitly, because on the server
+ * `NETWORK` is the deployment's own network, not the caller's.
+ */
+export function cancelSigningMessage(
+  owner: string,
+  nonce: bigint | string,
+  networkPassphrase: string = NETWORK.passphrase
+): string {
   return canonicalPairs([
     ["domain", APP_DOMAIN],
     ["action", "cancel_order"],
-    ["network", NETWORK.passphrase],
+    ["network", networkPassphrase],
     ["owner", owner],
     ["nonce", nonce.toString()],
   ]);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { StrKey } from "@stellar/stellar-sdk";
 import { db } from "@/lib/db";
-import { NETWORK } from "@/config";
+import { networkAwareCacheControl, networkFromRequest } from "@/lib/network-server";
 import { rateLimit, requestKey } from "@/lib/rate-limit";
 
 const AMOUNT_SCALE = 1e7;
@@ -13,32 +13,33 @@ function n(v: unknown, scale = AMOUNT_SCALE): number {
 
 // GET /api/portfolio/<address>
 // Returns denormalized analytics + recent history for the portfolio page.
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ address: string }> }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ address: string }> }) {
   const { address } = await ctx.params;
   if (!StrKey.isValidEd25519PublicKey(address)) {
     return NextResponse.json({ error: "invalid address" }, { status: 400 });
   }
-  if (!(await rateLimit(requestKey(_req, address), 120))) {
+  if (!(await rateLimit(requestKey(req, address), 120))) {
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
 
   try {
-    const sql = db();
+    const network = networkFromRequest(req);
+    const sql = db(network);
 
     const [analyticsRows, pnlHistory, balanceHistory, fundingHistory, snapshots] = await Promise.all([
-      sql`SELECT * FROM "AccountAnalytics" WHERE network = ${NETWORK.name} AND address = ${address} LIMIT 1`,
+      sql`SELECT * FROM "AccountAnalytics" WHERE network = ${network} AND address = ${address} LIMIT 1`,
       sql`SELECT kind, amount, size, price, "marketId", "txHash", "createdAt"
-          FROM "PnlEvent" WHERE network = ${NETWORK.name} AND address = ${address}
+          FROM "PnlEvent" WHERE network = ${network} AND address = ${address}
           ORDER BY "createdAt" DESC LIMIT 100`,
       sql`SELECT kind, asset, amount, "balanceAfter", "txHash", "createdAt"
-          FROM "BalanceChange" WHERE network = ${NETWORK.name} AND address = ${address}
+          FROM "BalanceChange" WHERE network = ${network} AND address = ${address}
           ORDER BY "createdAt" DESC LIMIT 50`,
       sql`SELECT "marketId", amount, "fundingIndex", "txHash", "createdAt"
-          FROM "FundingPayment" WHERE network = ${NETWORK.name} AND address = ${address}
+          FROM "FundingPayment" WHERE network = ${network} AND address = ${address}
           ORDER BY "createdAt" DESC LIMIT 50`,
       sql`SELECT equity, "unrealizedPnl", "realizedPnlCum", "freeCollateral",
                  "usedMargin", "openPositionCount", "longExposure", "shortExposure", "capturedAt"
-          FROM "PortfolioSnapshot" WHERE network = ${NETWORK.name} AND address = ${address}
+          FROM "PortfolioSnapshot" WHERE network = ${network} AND address = ${address}
           ORDER BY "capturedAt" DESC LIMIT 200`,
     ]);
 
@@ -85,7 +86,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ address: s
           at: r.capturedAt,
         })),
       },
-      { headers: { "Cache-Control": "s-maxage=5, stale-while-revalidate=15" } }
+      { headers: { "Cache-Control": networkAwareCacheControl(req, "s-maxage=5, stale-while-revalidate=15") } }
     );
   } catch {
     return NextResponse.json({ address, analytics: null, error: "portfolio_unavailable" }, { status: 500 });

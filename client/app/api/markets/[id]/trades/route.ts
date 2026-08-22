@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 
 // Prices are stored in 1e18 precision (PRICE_PRECISION).
 // Sizes are stored in 1e7 precision (AMOUNT_PRECISION) for real fills,
@@ -25,7 +26,7 @@ export async function GET(
   const limit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "50", 10), 200);
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
     const rows = await sql`
       SELECT
         "fillPrice"::text  AS fill_price,

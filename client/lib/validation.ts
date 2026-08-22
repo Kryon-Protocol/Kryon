@@ -2,7 +2,7 @@
 // payloads out of the DB and the matcher. Pure functions — no I/O.
 
 import { StrKey } from "@stellar/stellar-sdk";
-import { ACTIVE_MARKETS, AMOUNT_PRECISION, NETWORK, PRICE_PRECISION } from "@/config";
+import { ACTIVE_MARKETS, AMOUNT_PRECISION, PRICE_PRECISION } from "@/config";
 import { assertU64, orderSettlementMessage, pubkeyHexFromAddress } from "@/lib/market/signing-message";
 import { verifySignedMessage } from "@/lib/market/signed-intent";
 
@@ -40,7 +40,17 @@ function parseBigInt(v: unknown): bigint | null {
   }
 }
 
-export function validateOrderIntent(body: unknown): ValidationResult {
+/**
+ * @param networkPassphrase The passphrase of the network the CALLER selected,
+ *   from `networkFromRequest(req)`. Required rather than defaulted on purpose:
+ *   this runs on the server, where the module-scope `NETWORK` is the
+ *   deployment's own network. Defaulting to it would verify a testnet-signed
+ *   order against the mainnet passphrase (and vice versa), rejecting every
+ *   order on the non-primary venue — or, worse, accepting a signature intended
+ *   for the other network. Making it required means the compiler catches any
+ *   new call site that forgets.
+ */
+export function validateOrderIntent(body: unknown, networkPassphrase: string): ValidationResult {
   if (typeof body !== "object" || body === null) return { ok: false, error: "Body must be an object" };
   const b = body as Record<string, unknown>;
 
@@ -94,7 +104,7 @@ export function validateOrderIntent(body: unknown): ValidationResult {
     expiry_ts: expiryTs.toString(),
   };
   const pubkeyHex = pubkeyHexFromAddress(b.owner);
-  if (!verifySignedMessage(b.owner, orderSettlementMessage(NETWORK.passphrase, pubkeyHex, signed), b.signature)) {
+  if (!verifySignedMessage(b.owner, orderSettlementMessage(networkPassphrase, pubkeyHex, signed), b.signature)) {
     return { ok: false, error: "Invalid order signature" };
   }
 

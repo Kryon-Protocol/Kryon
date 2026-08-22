@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useWalletStore } from "@/stores/wallet";
 import { useLocalOrders } from "@/stores/orders";
 import { getOrderFilled, isCancelled } from "@/lib/stellar/contracts";
+import { apiFetch } from "@/lib/api";
 
 const POLL_MS = 8_000;
 
@@ -44,7 +45,7 @@ export function useOrderReconciliation() {
     async function reconcile() {
       // ── 1. Sync from DB ───────────────────────────────────────────────────
       try {
-        const res = await fetch(`/api/orders?address=${owner}&limit=50`, { cache: "no-store" });
+        const res = await apiFetch(`/api/orders?address=${owner}&limit=50`, { cache: "no-store" });
         if (res.ok) {
           const dbOrders: DbOrder[] = await res.json();
           const store = useLocalOrders.getState();

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Poppins, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/common/Providers";
+import { networkFromCookies } from "@/lib/network-server";
 import "./globals.css";
 
 const poppins = Poppins({
@@ -16,7 +17,7 @@ export const metadata: Metadata = {
   // new URL("") throw ERR_INVALID_URL and kill the whole build.
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"),
   title: "Kryon | Perpetuals DEX",
-  description: "Decentralised perpetual futures on Stellar/Soroban — XLM-PERP",
+  description: "Decentralised perpetual futures on Stellar/Soroban — BTC, ETH, XLM, SOL, XRP, ADA, BNB and TRX perpetuals",
   applicationName: "Kryon",
   icons: {
     icon: [
@@ -46,11 +47,15 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Reading the cookie opts this layout into request-time rendering, which is
+  // required and intended: the chrome differs per selected network.
+  const network = await networkFromCookies();
+
   return (
     <html lang="en" className={`${poppins.variable} ${geistMono.variable} dark h-full`}>
       <body className="min-h-dvh bg-[#19191A] text-[#f5f5f5] antialiased">
-        <Providers>{children}</Providers>
+        <Providers network={network}>{children}</Providers>
       </body>
     </html>
   );

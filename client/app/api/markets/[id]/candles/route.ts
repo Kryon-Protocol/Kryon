@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 
 // Build OHLCV candles by bucketing fills into time windows.
 // Returns newest-first to match frontend expectations.
@@ -15,7 +16,7 @@ export async function GET(
   const limit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "600", 10), 1000);
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
 
     // Each fill becomes an OHLCV bucket. For sparse data, each fill is its own candle.
     // For real volume: aggregate fills within the same tf window.

@@ -9,16 +9,20 @@ import { getPositions } from '@/lib/stellar/contracts'
 import { KryonChart } from '@/features/chart/components/KryonChart'
 import { priceToHuman, amountToHuman } from '@/lib/format'
 import { calcLiqPrice } from '@/lib/math'
-import { MARKETS } from '@/config'
+import type { MarketConfig } from '@/config'
 import type { PositionOverlay, OrderOverlay } from '@/features/chart/types'
 
 interface Props {
-  symbol: string
-  marketId?: number | string
+  /**
+   * The full market config. Previously this took `symbol` plus an optional
+   * `marketId` defaulting to 1, so any caller that forgot to pass one silently
+   * charted XLM-PERP's position and orders over another market's candles.
+   */
+  market: MarketConfig
 }
 
-export function TradeChart({ symbol, marketId = 1 }: Props) {
-  const marketIdNum = typeof marketId === 'string' ? (parseInt(marketId, 10) || 1) : (marketId as number)
+export function TradeChart({ market }: Props) {
+  const marketIdNum = market.marketId
   const { address, connected } = useWalletStore()
   const markPrices = useMarketStore((s) => s.markPrices)
 
@@ -35,16 +39,15 @@ export function TradeChart({ symbol, marketId = 1 }: Props) {
     refetchInterval: 10_000,
   })
 
-  const market = Object.values(MARKETS).find((m) => m.marketId === marketIdNum)
   const rawPos = allPositions.find((p) => p.marketId === marketIdNum)
 
   // Build position overlay for the chart (entry, liq, mark lines)
   const positionOverlay: PositionOverlay | undefined = (() => {
-    if (!rawPos || !market || rawPos.entryPrice <= 0n || rawPos.margin <= 0n) return undefined
+    if (!rawPos || rawPos.entryPrice <= 0n || rawPos.margin <= 0n) return undefined
     const entryPrice = priceToHuman(rawPos.entryPrice)
     const sizeHuman = amountToHuman(rawPos.size)
     const marginHuman = amountToHuman(rawPos.margin)
-    // notional (USD) = size_xlm × entry_usd  →  leverage = notional / margin_usd
+    // notional (USD) = size_base × entry_usd  →  leverage = notional / margin_usd
     const notional = sizeHuman * entryPrice
     const leverage = Math.max(1, Math.round(notional / Math.max(marginHuman, 0.0001)))
     const liqRaw = calcLiqPrice(rawPos.isLong, rawPos.entryPrice, leverage, market.maintenanceMarginBps)
@@ -73,8 +76,9 @@ export function TradeChart({ symbol, marketId = 1 }: Props) {
   return (
     <div className="h-full min-h-0">
       <KryonChart
-        symbol={symbol}
-        marketId={String(marketIdNum)}
+        symbol={market.tvSymbol}
+        marketSymbol={market.symbol}
+        priceDecimals={market.priceDecimals}
         position={positionOverlay}
         orders={orderOverlays}
       />

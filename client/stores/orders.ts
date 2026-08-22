@@ -3,6 +3,18 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { OrderIntent } from "@/lib/market/order-intent";
+import { ACTIVE_NETWORK_ID } from "@/config";
+
+/**
+ * Locally-tracked orders are per-network.
+ *
+ * A single shared key would survive the reload that a network switch performs —
+ * localStorage is not cleared by navigation — so the previous venue's pending
+ * orders would reappear in the new one's Open Orders table, showing mainnet
+ * orders (with mainnet nonces, against mainnet contracts) inside a testnet
+ * session. Namespacing the key gives each venue its own list.
+ */
+const STORAGE_KEY = `kryon-orders:${ACTIVE_NETWORK_ID}`;
 
 const bigIntStorage = createJSONStorage(() => localStorage, {
   replacer: (_key, value) => (typeof value === "bigint" ? `__bigint__${value}` : value),
@@ -56,7 +68,7 @@ export const useLocalOrders = create<OrdersState>()(
       clearAll: () => set({ orders: [] }),
     }),
     {
-      name: "kryon-orders",
+      name: STORAGE_KEY,
       storage: bigIntStorage,
     }
   )
@@ -66,7 +78,7 @@ export const useLocalOrders = create<OrdersState>()(
 // this tab's store so Open Orders / history stay consistent across tabs.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
-    if (e.key === "kryon-orders") {
+    if (e.key === STORAGE_KEY) {
       void useLocalOrders.persist.rehydrate();
     }
   });

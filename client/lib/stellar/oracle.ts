@@ -6,17 +6,23 @@ import { CONTRACTS } from "@/config";
 
 const DUMMY_SOURCE = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
-// Asset symbol as published by the oracle keeper. Must match what write_price was called with.
-const ASSET_SYMBOL_XLM = "XLM";
-
 export interface OraclePriceResult {
   price: bigint;       // 1e18 precision
   confidence: bigint;  // 1e18 precision
   publishTime: number;
 }
 
+/**
+ * Reads a published oracle price.
+ *
+ * `assetSymbol` is REQUIRED and must match what the keeper called write_price
+ * with (MarketConfig.oracleSymbol). It used to default to "XLM", which meant
+ * every market that called this without an argument silently displayed XLM's
+ * price as its mark — invisible on XLM-PERP, catastrophic anywhere else.
+ * Do not reintroduce a default.
+ */
 export async function getOraclePrice(
-  assetSymbol: string = ASSET_SYMBOL_XLM
+  assetSymbol: string
 ): Promise<OraclePriceResult | null> {
   try {
     // Soroban Symbol arg for the asset

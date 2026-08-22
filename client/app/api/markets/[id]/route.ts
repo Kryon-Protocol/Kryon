@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -10,7 +11,7 @@ export async function GET(
   if (!marketId) return NextResponse.json({ error: "invalid_id" }, { status: 400 });
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
     const rows = await sql`
       SELECT
         id AS market_id,

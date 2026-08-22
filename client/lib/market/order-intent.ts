@@ -15,6 +15,31 @@ export interface OrderIntent {
   expiryTs: bigint;   // unix seconds
 }
 
+// Nonce uniqueness is GLOBAL PER ACCOUNT, not per market: the DB enforces
+// Order @@unique([owner, nonce]) and the gateway keys Filled(owner, nonce) /
+// Cancelled(owner, nonce) the same way (perp-order-gateway/src/lib.rs).
+//
+// A bare Date.now() is millisecond-resolution, so a trader placing orders in
+// two markets inside the same millisecond — routine once a quoting bot works
+// eight books — collides. Off-chain that is a unique-constraint error; ON-CHAIN
+// it means two different orders sharing one fill counter, so filling order A
+// advances the limit on order B and cancelling one nonce cancels both. That is
+// a settlement-correctness bug, not a nuisance.
+//
+// Appending a per-session counter gives 1000 distinct nonces per millisecond
+// while keeping the value time-ordered. The `lastNonce` clamp makes uniqueness
+// hold unconditionally rather than only while fewer than 1000 orders land in
+// the same millisecond, and also survives a backwards clock step. No contract
+// change — the value stays a plain u64.
+let nonceCounter = 0;
+let lastNonce = 0n;
+
+export function nextOrderNonce(): bigint {
+  const candidate = BigInt(Date.now()) * 1000n + BigInt(nonceCounter++ % 1000);
+  lastNonce = candidate > lastNonce ? candidate : lastNonce + 1n;
+  return lastNonce;
+}
+
 export function buildOrderIntent(params: {
   owner: string;
   marketId: number;
@@ -31,7 +56,7 @@ export function buildOrderIntent(params: {
     size: params.size,
     limitPrice: params.limitPrice,
     reduceOnly: params.reduceOnly ?? false,
-    nonce: BigInt(Date.now()),
+    nonce: nextOrderNonce(),
     expiryTs: BigInt(Math.floor(Date.now() / 1000) + (params.ttlSeconds ?? 300)),
   };
 }

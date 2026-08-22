@@ -10,10 +10,10 @@ import { useLocalOrders } from "@/stores/orders";
 import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getBalance, getAccountHealth } from "@/lib/stellar/contracts";
-import { amountToHuman, priceToHuman } from "@/lib/format";
+import { amountToHuman, formatMarketPrice, formatMarketUsd, priceToHuman, toPriceInput } from "@/lib/format";
 import { freighterConnect, freighterIsInstalled, isOnExpectedNetwork } from "@/lib/stellar/freighter";
 import { calcLiqPrice } from "@/lib/math";
-import { UsdcLogo, XlmLogo } from "@/components/common/AssetLogos";
+import { UsdcLogo, logoFor } from "@/components/common/AssetLogos";
 import { useTradeSettings } from "@/stores/settings";
 import { Shuffle, X } from "lucide-react";
 
@@ -162,10 +162,10 @@ export function OrderEntry({
     if (selectedPrice != null && selectedPrice > 0) {
       queueMicrotask(() => {
         setOrderType("limit");
-        setLimitPrice(selectedPrice.toFixed(4));
+        setLimitPrice(toPriceInput(market, selectedPrice));
       });
     }
-  }, [selectedPrice]);
+  }, [selectedPrice, market]);
 
   const { data: balance } = useQuery({
     queryKey: ["balance", address],
@@ -196,9 +196,9 @@ export function OrderEntry({
 
   const sizeNum = parseFloat(size) || 0;
   const limitPriceNum = parseFloat(limitPrice) || 0;
-  const baseSymbol = market.symbol.replace("-PERP", "");
+  const baseSymbol = market.baseAsset;
   const sizeUnit = sizeInQuote ? market.quoteAsset : baseSymbol;
-  const midDisplay = midPriceHuman !== null ? midPriceHuman.toFixed(4) : "—";
+  const midDisplay = midPriceHuman !== null ? formatMarketPrice(market, midPriceHuman) : "—";
 
   const execPrice = orderType === "market" ? midPriceHuman ?? 0 : limitPriceNum;
   const bestAsk = book?.asks[0] ? parseFloat(book.asks[0].price) : null;
@@ -223,7 +223,7 @@ export function OrderEntry({
       market.maintenanceMarginBps
     );
     if (liq <= 0n) return "—";
-    return "$" + priceToHuman(liq).toFixed(4);
+    return formatMarketUsd(market, liq);
   })();
 
   async function handleConnect() {
@@ -417,7 +417,7 @@ export function OrderEntry({
               onClick={() => {
                 setOrderType("market");
                 setPost(false);
-                if (midPriceHuman && !limitPrice) setLimitPrice(midPriceHuman.toFixed(4));
+                if (midPriceHuman && !limitPrice) setLimitPrice(toPriceInput(market, midPriceHuman));
               }}
             >
               Market
@@ -431,7 +431,7 @@ export function OrderEntry({
               }`}
               onClick={() => {
                 setOrderType("limit");
-                if (midPriceHuman && !limitPrice) setLimitPrice(midPriceHuman.toFixed(4));
+                if (midPriceHuman && !limitPrice) setLimitPrice(toPriceInput(market, midPriceHuman));
               }}
             >
               Limit
@@ -492,7 +492,7 @@ export function OrderEntry({
               className="flex items-center gap-1.5 px-2 py-[3px] bg-[#212128] border border-[#334155] rounded-[6px] text-[#f5f5f5] text-[12px] font-medium transition-colors hover:border-[#475569]"
               title="Toggle order size denomination"
             >
-              {sizeInQuote ? <UsdcLogo size={15} /> : baseSymbol === "XLM" ? <XlmLogo size={15} /> : null}
+              {sizeInQuote ? <UsdcLogo size={15} /> : logoFor(baseSymbol, 15)}
               {sizeUnit}
               <Shuffle size={13} className="text-[#a3a3a3]" />
             </button>
@@ -636,7 +636,7 @@ export function OrderEntry({
           <div className={rowCls}>
             <span>{orderType === "market" ? "Expected Price" : "Limit Price"}</span>
             <span className="font-mono text-[#f5f5f5]">
-              {execPrice > 0 ? `$${execPrice.toFixed(4)}` : "—"}
+              {execPrice > 0 ? formatMarketUsd(market, execPrice) : "—"}
             </span>
           </div>
           <div className={rowCls}>

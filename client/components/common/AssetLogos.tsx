@@ -1,4 +1,10 @@
-// Real asset marks used wherever USDC / XLM appear in the UI.
+// Asset marks. Every market's base asset needs one, plus USDC as the
+// settlement asset. Prefer <AssetLogo symbol={…} /> or logoFor() over
+// importing an individual mark — eight call sites used to read
+// `baseSymbol === "XLM" ? <XlmLogo/> : null`, which rendered no mark at all
+// for every market that was not XLM.
+
+import type { ReactNode } from "react";
 
 export function UsdcLogo({ size = 16 }: { size?: number }) {
   return (
@@ -30,4 +36,174 @@ export function XlmLogo({ size = 16 }: { size?: number }) {
       />
     </svg>
   );
+}
+
+
+export function BtcLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#F7931A" />
+      <path
+        fill="#ffffff"
+        d="M22.5 14.2c.3-2-1.2-3-3.3-3.8l.7-2.7-1.7-.4-.7 2.6-1.3-.3.7-2.6-1.6-.4-.7 2.7-1-.3-2.3-.6-.4 1.8s1.2.3 1.2.3c.7.2.8.6.8 1l-.8 3.1v.1l-1.1 4.4c-.1.2-.3.5-.8.4 0 0-1.2-.3-1.2-.3l-.9 1.9 2.2.5 1.2.3-.7 2.7 1.6.4.7-2.7 1.3.3-.7 2.7 1.7.4.7-2.7c2.8.5 4.9.3 5.8-2.2.7-2-.1-3.2-1.5-4 1.1-.2 1.9-.9 2.1-2.4zm-3.7 5.3c-.5 2-3.9.9-5 .7l.9-3.6c1.1.3 4.6.8 4.1 2.9zm.5-5.4c-.5 1.9-3.3.9-4.2.7l.8-3.3c.9.2 3.9.6 3.4 2.6z"
+      />
+    </svg>
+  );
+}
+
+export function EthLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#627EEA" />
+      <g fill="#ffffff" fillRule="nonzero">
+        <path fillOpacity=".6" d="M16.5 4v8.9l7.5 3.3z" />
+        <path d="M16.5 4L9 16.2l7.5-3.3z" />
+        <path fillOpacity=".6" d="M16.5 21.9v6.1L24 17.6z" />
+        <path d="M16.5 28v-6.1L9 17.6z" />
+        <path fillOpacity=".2" d="M16.5 20.5l7.5-4.3-7.5-3.3z" />
+        <path fillOpacity=".6" d="M9 16.2l7.5 4.3v-7.6z" />
+      </g>
+    </svg>
+  );
+}
+
+export function SolLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#000000" />
+      <defs>
+        <linearGradient id="kryon-sol-g" x1="4" y1="24" x2="28" y2="8" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#9945FF" />
+          <stop offset="1" stopColor="#14F195" />
+        </linearGradient>
+      </defs>
+      <g fill="url(#kryon-sol-g)">
+        <path d="M9.6 20.4c.15-.15.35-.24.56-.24h14.1c.36 0 .53.43.28.68l-2.74 2.74a.8.8 0 0 1-.56.23H7.14c-.35 0-.53-.43-.28-.68l2.74-2.73z" />
+        <path d="M9.6 8.42a.8.8 0 0 1 .56-.23h14.1c.36 0 .53.43.28.68l-2.74 2.74a.8.8 0 0 1-.56.23H7.14c-.35 0-.53-.43-.28-.68l2.74-2.74z" />
+        <path d="M22.26 14.37a.8.8 0 0 0-.56-.23H7.6c-.36 0-.53.43-.28.68l2.74 2.74c.15.15.35.23.56.23h14.1c.36 0 .53-.43.28-.68l-2.74-2.74z" />
+      </g>
+    </svg>
+  );
+}
+
+export function XrpLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#23292F" />
+      <path
+        fill="#ffffff"
+        d="M22.2 8h2.7l-5.6 5.6a4.7 4.7 0 0 1-6.6 0L7.1 8h2.7l4.2 4.2c.9.9 2.5.9 3.4 0L22.2 8zM9.8 24H7.1l5.6-5.6a4.7 4.7 0 0 1 6.6 0L24.9 24h-2.7l-4.2-4.2a2.4 2.4 0 0 0-3.4 0L9.8 24z"
+      />
+    </svg>
+  );
+}
+
+export function AdaLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#0033AD" />
+      <g fill="#ffffff">
+        <circle cx="16" cy="16" r="2.1" />
+        <circle cx="16" cy="7.6" r="1.25" />
+        <circle cx="16" cy="24.4" r="1.25" />
+        <circle cx="8.7" cy="11.8" r="1.25" />
+        <circle cx="23.3" cy="20.2" r="1.25" />
+        <circle cx="8.7" cy="20.2" r="1.25" />
+        <circle cx="23.3" cy="11.8" r="1.25" />
+        <circle cx="16" cy="11.4" r=".95" />
+        <circle cx="16" cy="20.6" r=".95" />
+        <circle cx="12" cy="13.7" r=".95" />
+        <circle cx="20" cy="18.3" r=".95" />
+        <circle cx="12" cy="18.3" r=".95" />
+        <circle cx="20" cy="13.7" r=".95" />
+        <circle cx="5.2" cy="16" r=".8" />
+        <circle cx="26.8" cy="16" r=".8" />
+        <circle cx="10.6" cy="5.9" r=".8" />
+        <circle cx="21.4" cy="26.1" r=".8" />
+        <circle cx="10.6" cy="26.1" r=".8" />
+        <circle cx="21.4" cy="5.9" r=".8" />
+      </g>
+    </svg>
+  );
+}
+
+export function BnbLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#F3BA2F" />
+      <path
+        fill="#ffffff"
+        d="M16 6.6l2.6 2.7-6.5 6.5-2.7-2.6L16 6.6zm7.1 7.1l2.6 2.7-9.7 9.7-9.7-9.7 2.6-2.7L16 21l7.1-7.3zm-13.6 2.7L6.9 16l2.6-2.6L12.1 16l-2.6 2.4zm10.4-.4L16 19l-3.2-3.2h.1L16 12.9l3.9 3.1z"
+      />
+      <path fill="#ffffff" d="M22.5 16l2.6-2.6L27.7 16l-2.6 2.6L22.5 16z" />
+    </svg>
+  );
+}
+
+export function TrxLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill="#EB0029" />
+      <path
+        fill="#ffffff"
+        d="M23.6 11.3L9.2 8.2c-.3-.1-.5.2-.4.4l6 17.4c.1.3.5.3.6.1l8.4-14.3c.1-.2 0-.4-.2-.5zM21.4 12.6l-2.5 4.3-6.4-5.9 8.9 1.6zM11.3 11.5l6.3 5.8-2.1 6.9-4.2-12.7z"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Fallback for an asset with no dedicated mark, so a new market still renders
+ * something recognisable instead of a hole in the layout.
+ */
+export function LetterLogo({ symbol, size = 16 }: { symbol: string; size?: number }) {
+  const letters = symbol.slice(0, 2).toUpperCase();
+  // Deterministic hue from the symbol — stable across renders and reloads.
+  let h = 0;
+  for (let i = 0; i < symbol.length; i++) h = (h * 31 + symbol.charCodeAt(i)) % 360;
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="16" cy="16" r="16" fill={`hsl(${h} 42% 34%)`} />
+      <text
+        x="16"
+        y="16"
+        textAnchor="middle"
+        dominantBaseline="central"
+        fontSize={letters.length > 1 ? 13 : 16}
+        fontWeight="600"
+        fill="#ffffff"
+        fontFamily="system-ui, sans-serif"
+      >
+        {letters}
+      </text>
+    </svg>
+  );
+}
+
+const LOGOS: Record<string, (p: { size?: number }) => ReactNode> = {
+  USDC: UsdcLogo,
+  XLM: XlmLogo,
+  BTC: BtcLogo,
+  ETH: EthLogo,
+  SOL: SolLogo,
+  XRP: XrpLogo,
+  ADA: AdaLogo,
+  BNB: BnbLogo,
+  TRX: TrxLogo,
+};
+
+/**
+ * The mark for an asset symbol. Accepts either a bare asset ("BTC") or a
+ * market symbol ("BTC-PERP"). Unknown assets fall back to a lettered circle
+ * rather than rendering nothing.
+ */
+export function logoFor(symbol: string, size = 16): ReactNode {
+  const base = (symbol ?? "").replace(/-PERP$/i, "").toUpperCase();
+  const Logo = LOGOS[base];
+  return Logo ? <Logo size={size} /> : <LetterLogo symbol={base || "?"} size={size} />;
+}
+
+/** Component form of logoFor, for JSX call sites. */
+export function AssetLogo({ symbol, size = 16 }: { symbol: string; size?: number }) {
+  return <>{logoFor(symbol, size)}</>;
 }

@@ -11,19 +11,20 @@ import {
   wsDisconnect,
   wsReset,
 } from "@/lib/market/websocket";
-import { MARKETS, PRICE_PRECISION } from "@/config";
+import { ACTIVE_MARKETS, MARKETS, PRICE_PRECISION, type MarketConfig } from "@/config";
 import type { OrderBook, RecentTrade } from "@/lib/market/matcher";
+import { apiFetch } from "@/lib/api";
 
 interface Props {
-  marketId: number;
+  market: MarketConfig;
   children: React.ReactNode;
 }
 
-// Derive Binance pair from market config base asset
-function getBinancePair(marketId: number): string {
+// Binance pair for a market. Unknown ids return null rather than falling back
+// to XLM — a wrong ticker is worse than no 24h stats.
+function getBinancePair(marketId: number): string | null {
   const market = Object.values(MARKETS).find((m) => m.marketId === marketId);
-  const base = market?.baseAsset ?? "XLM";
-  return `${base}USDT`;
+  return market ? market.priceSourceSymbol : null;
 }
 
 // Fetch Binance 24h ticker once — gives last price, 24h high/low, and 24h % change.
@@ -32,6 +33,7 @@ async function fetchBinance24h(
 ): Promise<{ price: bigint; highPrice: bigint; lowPrice: bigint; changePct: number } | null> {
   try {
     const pair = getBinancePair(marketId);
+    if (!pair) return null;
     const res = await fetch(
       `https://api.binance.com/api/v3/ticker/24hr?symbol=${pair}`,
       { cache: "no-store" }
@@ -58,7 +60,47 @@ async function fetchBinance24h(
   }
 }
 
-export function MarketDataProvider({ marketId, children }: Props) {
+/**
+ * One batched 24h ticker for EVERY active market.
+ *
+ * The market switcher and the markets page show a price and 24h change per
+ * row, which needs data for markets the terminal is not currently subscribed
+ * to. Binance's /ticker/24hr accepts a `symbols` array, so this is a single
+ * request for all eight rather than eight requests — and notably it does NOT
+ * require touching lib/market/websocket.ts, whose single global handler set
+ * still only has to serve the one market on screen.
+ */
+async function fetchAllTickers(): Promise<
+  Record<number, { price: bigint; changePct: number }>
+> {
+  const markets = Object.values(ACTIVE_MARKETS);
+  const symbols = markets.map((m) => m.priceSourceSymbol);
+  const url =
+    `https://api.binance.com/api/v3/ticker/24hr?symbols=` +
+    encodeURIComponent(JSON.stringify(symbols));
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return {};
+  const rows = (await res.json()) as { symbol: string; lastPrice: string; priceChangePercent: string }[];
+  const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
+
+  const out: Record<number, { price: bigint; changePct: number }> = {};
+  for (const m of markets) {
+    const r = bySymbol.get(m.priceSourceSymbol);
+    if (!r) continue;
+    const last = parseFloat(r.lastPrice);
+    const pct = parseFloat(r.priceChangePercent);
+    if (!Number.isFinite(last) || last <= 0) continue;
+    out[m.marketId] = {
+      price: BigInt(Math.round(last * Number(PRICE_PRECISION))),
+      changePct: Number.isFinite(pct) ? pct : 0,
+    };
+  }
+  return out;
+}
+
+export function MarketDataProvider({ market, children }: Props) {
+  const marketId = market.marketId;
+  const oracleSymbol = market.oracleSymbol;
   // NOTE: intentionally does NOT subscribe to the store (no useMarketStore()).
   // It only writes via getState() setters, so market-data ticks never re-render
   // this wrapper or its (stable) children.
@@ -87,6 +129,7 @@ export function MarketDataProvider({ marketId, children }: Props) {
         pollOrderBook();
         pollTrades();
         pollMarketStats();
+        pollAllTickers();
       }
     }
     document.addEventListener("visibilitychange", onVisibility);
@@ -98,7 +141,7 @@ export function MarketDataProvider({ marketId, children }: Props) {
       if (!visibleRef.current) return;
       await runOnce("oracle", async () => {
       try {
-        const result = await getOraclePrice();
+        const result = await getOraclePrice(oracleSymbol);
         if (cancelled) return;
         if (result && result.price > 0n) {
           set().setMarkPrice(marketId, result.price);
@@ -128,6 +171,24 @@ export function MarketDataProvider({ marketId, children }: Props) {
       });
     }
 
+    // ── All-markets ticker (switcher rows) ───────────────────────────────────
+    // Only writes markets OTHER than the active one, so it can never race the
+    // active market's oracle-backed mark price with a Binance figure.
+    async function pollAllTickers() {
+      if (!visibleRef.current) return;
+      await runOnce("allTickers", async () => {
+        try {
+          const all = await fetchAllTickers();
+          if (cancelled) return;
+          for (const [idStr, v] of Object.entries(all)) {
+            const id = Number(idStr);
+            set().setPriceChangePct(id, v.changePct);
+            if (id !== marketId) set().setMarkPrice(id, v.price);
+          }
+        } catch { /* best-effort — rows fall back to "—" */ }
+      });
+    }
+
     // ── Orderbook / trades REST polling (fallback when WS is down) ────────────
     async function pollOrderBook() {
       if (wsActiveRef.current || !visibleRef.current) return;
@@ -150,7 +211,7 @@ export function MarketDataProvider({ marketId, children }: Props) {
       if (!visibleRef.current) return;
       await runOnce("stats", async () => {
       try {
-        const res = await fetch(`/api/markets/${marketId}`, { cache: "no-store" });
+        const res = await apiFetch(`/api/markets/${marketId}`, { cache: "no-store" });
         if (!res.ok || cancelled) return;
         const data = (await res.json()) as Record<string, unknown>;
         if (cancelled) return;
@@ -185,6 +246,7 @@ export function MarketDataProvider({ marketId, children }: Props) {
     // Initial fetches immediately
     pollOracle();
     poll24h();
+    pollAllTickers();
     pollOrderBook();
     pollTrades();
     pollMarketStats();
@@ -194,6 +256,8 @@ export function MarketDataProvider({ marketId, children }: Props) {
       setInterval(() => { pollOrderBook(); pollTrades(); }, 1_500),
       setInterval(pollMarketStats, 15_000),
       setInterval(poll24h, 30_000),
+      // Switcher rows only need to be roughly live.
+      setInterval(pollAllTickers, 60_000),
     ];
 
     wsReset();
@@ -207,7 +271,7 @@ export function MarketDataProvider({ marketId, children }: Props) {
       wsUnsubscribe(marketId);
       wsDisconnect();
     };
-  }, [marketId]);
+  }, [marketId, oracleSymbol]);
 
   return <>{children}</>;
 }

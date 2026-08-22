@@ -2,8 +2,10 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useWalletStore } from "@/stores/wallet";
-import { MARKETS, STELLAR_EXPERT_URL } from "@/config";
-import { XlmLogo } from "@/components/common/AssetLogos";
+import { STELLAR_EXPERT_URL } from "@/config";
+import { MarketCell } from "@/components/common/MarketCell";
+import { priceFor, sizeFor } from "@/lib/format";
+import { apiFetch } from "@/lib/api";
 
 interface Fill {
   id: string | number;
@@ -15,17 +17,13 @@ interface Fill {
   createdAt: number;
 }
 
-function symbolFor(marketId: number): string {
-  return (Object.values(MARKETS).find((m) => m.marketId === marketId)?.symbol ?? "").replace("-PERP", "");
-}
-
 export function TradeHistoryTable({ marketFilter }: { marketFilter: number | "all" }) {
   const { address, connected } = useWalletStore();
 
   const { data: fills = [] } = useQuery<Fill[]>({
     queryKey: ["fills", address],
     queryFn: async () => {
-      const res = await fetch(`/api/fills?address=${address}&limit=50`, { cache: "no-store" });
+      const res = await apiFetch(`/api/fills?address=${address}&limit=50`, { cache: "no-store" });
       if (!res.ok) return [];
       return (await res.json()) as Fill[];
     },
@@ -55,24 +53,17 @@ export function TradeHistoryTable({ marketFilter }: { marketFilter: number | "al
       <tbody>
         {rows.map((f) => {
           const onChain = f.txHash && !f.txHash.startsWith("dbfill");
-          const baseSymbol = symbolFor(f.marketId);
           return (
             <tr key={String(f.id)} className="border-t border-[#2A2A31] hover:bg-white/[0.02] transition-colors">
               <td className="pl-4 pr-2 py-[10px] text-left text-[#a3a3a3]">
                 {new Date(f.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </td>
               <td className="px-3 py-[10px] text-left">
-                <span className="inline-flex items-center gap-1.5">
-                  {baseSymbol === "XLM" ? <XlmLogo size={15} /> : null}
-                  <span className="font-semibold text-[#f5f5f5]">
-                    {baseSymbol}
-                    <span className="text-[#737373] font-normal">/USDC</span>
-                  </span>
-                </span>
+                <MarketCell marketId={f.marketId} size={15} className="font-semibold text-[#f5f5f5]" />
               </td>
               <td className="px-3 py-[10px] text-right text-[#a3a3a3]">{f.isMaker ? "Maker" : "Taker"}</td>
-              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{Number(f.size).toFixed(4)}</td>
-              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">${Number(f.price).toFixed(4)}</td>
+              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{sizeFor(f.marketId, Number(f.size))}</td>
+              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{priceFor(f.marketId, Number(f.price))}</td>
               <td className="pr-4 pl-2 py-[10px] text-right">
                 {onChain ? (
                   <a

@@ -2,19 +2,14 @@
 
 import { useLocalOrders } from "@/stores/orders";
 import { useWalletStore } from "@/stores/wallet";
-import { priceToHuman, amountToHuman } from "@/lib/format";
-import { MARKETS } from "@/config";
-import { XlmLogo } from "@/components/common/AssetLogos";
+import { priceFor, sizeFor } from "@/lib/format";
+import { MarketCell } from "@/components/common/MarketCell";
 
 const STATUS_STYLE: Record<string, string> = {
   pending: "bg-amber-500/10 text-amber-400 border-amber-500/20",
   filled: "bg-[rgba(31,174,91,0.12)] text-[#1fae5b] border-[#1fae5b]/20",
   cancelled: "bg-[#2a2a30] text-[#a3a3a3] border-[#334155]",
 };
-
-function symbolFor(marketId: number): string {
-  return (Object.values(MARKETS).find((m) => m.marketId === marketId)?.symbol ?? "").replace("-PERP", "");
-}
 
 export function OrderHistoryTable({
   marketFilter,
@@ -53,7 +48,6 @@ export function OrderHistoryTable({
       <tbody>
         {rows.map((o) => {
           const isMarket = o.limitPrice === 0n;
-          const baseSymbol = symbolFor(o.marketId);
           const sideBadge = o.isLong
             ? "bg-[rgba(31,174,91,0.12)] text-[#1fae5b]"
             : "bg-[rgba(227,76,76,0.12)] text-[#e34c4c]";
@@ -63,13 +57,7 @@ export function OrderHistoryTable({
                 {new Date(Number(o.nonce)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </td>
               <td className="px-3 py-[10px] text-left">
-                <span className="inline-flex items-center gap-1.5">
-                  {baseSymbol === "XLM" ? <XlmLogo size={15} /> : null}
-                  <span className="font-semibold text-[#f5f5f5]">
-                    {baseSymbol}
-                    <span className="text-[#737373] font-normal">/USDC</span>
-                  </span>
-                </span>
+                <MarketCell marketId={o.marketId} size={15} className="font-semibold text-[#f5f5f5]" />
               </td>
               <td className="px-3 py-[10px] text-right text-[#a3a3a3]">{isMarket ? "Market" : "Limit"}</td>
               <td className="px-3 py-[10px] text-right">
@@ -77,9 +65,9 @@ export function OrderHistoryTable({
                   {o.isLong ? "LONG" : "SHORT"}
                 </span>
               </td>
-              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{amountToHuman(o.size).toFixed(4)}</td>
+              <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{sizeFor(o.marketId, o.size)}</td>
               <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">
-                {isMarket ? "Market" : `$${priceToHuman(o.limitPrice).toFixed(4)}`}
+                {isMarket ? "Market" : priceFor(o.marketId, o.limitPrice)}
               </td>
               <td className="px-3 py-[10px] text-right">
                 <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium border capitalize ${STATUS_STYLE[o.status] ?? STATUS_STYLE.cancelled}`}>

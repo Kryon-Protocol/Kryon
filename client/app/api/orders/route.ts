@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, withRetry } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
+import { getNetworkConfig } from "@/config/networks";
 import { validateOrderIntent } from "@/lib/validation";
 import { bodyTooLarge, rateLimit, requestKey } from "@/lib/rate-limit";
 
@@ -29,7 +31,8 @@ export async function POST(req: NextRequest) {
 
   // Validate before touching the DB — keeps malformed/abusive intents out of
   // the orderbook and the matcher.
-  const result = validateOrderIntent(body);
+  const network = networkFromRequest(req);
+  const result = validateOrderIntent(body, getNetworkConfig(network).passphrase);
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
   }
@@ -39,7 +42,7 @@ export async function POST(req: NextRequest) {
     : null;
 
   try {
-    const sql = db();
+    const sql = db(network);
 
     await withRetry(async () => {
       // Auto-create Account row if this is a new trader (FK required)

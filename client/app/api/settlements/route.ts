@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { StrKey } from "@stellar/stellar-sdk";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 import { rateLimit, requestKey } from "@/lib/rate-limit";
 
 // GET /api/settlements?address=G...
@@ -16,7 +17,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
     const rows = await sql`
       SELECT id, "payloadHash", "unsignedXdr", "createdAt"
       FROM "TxJob"

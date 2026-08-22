@@ -4,9 +4,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { NetworkProvider } from "@/features/network/NetworkContext";
+import type { NetworkId } from "@/config";
 import { useState } from "react";
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({ network, children }: { network: NetworkId; children: React.ReactNode }) {
   // Lazy initializer: the QueryClient is created exactly once per mount and is
   // never recreated on re-render (avoids tearing down the cache).
   const [client] = useState(
@@ -28,12 +30,14 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <ErrorBoundary>
-      <QueryClientProvider client={client}>
-        <TooltipProvider delay={300}>
-          {children}
-          <Toaster position="bottom-right" theme="dark" />
-        </TooltipProvider>
-      </QueryClientProvider>
+      <NetworkProvider network={network}>
+        <QueryClientProvider client={client}>
+          <TooltipProvider delay={300}>
+            {children}
+            <Toaster position="bottom-right" theme="dark" />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </NetworkProvider>
     </ErrorBoundary>
   );
 }

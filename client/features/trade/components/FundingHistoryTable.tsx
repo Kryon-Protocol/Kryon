@@ -2,8 +2,9 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useWalletStore } from "@/stores/wallet";
-import { MARKETS, STELLAR_EXPERT_URL } from "@/config";
-import { XlmLogo } from "@/components/common/AssetLogos";
+import { STELLAR_EXPERT_URL } from "@/config";
+import { MarketCell } from "@/components/common/MarketCell";
+import { apiFetch } from "@/lib/api";
 
 interface FundingPayment {
   marketId: number;
@@ -12,17 +13,13 @@ interface FundingPayment {
   createdAt: number;
 }
 
-function symbolFor(marketId: number): string {
-  return (Object.values(MARKETS).find((m) => m.marketId === marketId)?.symbol ?? "").replace("-PERP", "");
-}
-
 export function FundingHistoryTable({ marketFilter }: { marketFilter: number | "all" }) {
   const { address, connected } = useWalletStore();
 
   const { data: payments = [] } = useQuery<FundingPayment[]>({
     queryKey: ["funding", address],
     queryFn: async () => {
-      const res = await fetch(`/api/funding?address=${address}&limit=50`, { cache: "no-store" });
+      const res = await apiFetch(`/api/funding?address=${address}&limit=50`, { cache: "no-store" });
       if (!res.ok) return [];
       return (await res.json()) as FundingPayment[];
     },
@@ -56,7 +53,6 @@ export function FundingHistoryTable({ marketFilter }: { marketFilter: number | "
       </thead>
       <tbody>
         {rows.map((p) => {
-          const baseSymbol = symbolFor(p.marketId);
           const positive = p.amount >= 0;
           const onChain = p.txHash && !p.txHash.startsWith("0x000");
           return (
@@ -65,13 +61,7 @@ export function FundingHistoryTable({ marketFilter }: { marketFilter: number | "
                 {new Date(p.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </td>
               <td className="px-3 py-[10px] text-left">
-                <span className="inline-flex items-center gap-1.5">
-                  {baseSymbol === "XLM" ? <XlmLogo size={15} /> : null}
-                  <span className="font-semibold text-[#f5f5f5]">
-                    {baseSymbol}
-                    <span className="text-[#737373] font-normal">/USDC</span>
-                  </span>
-                </span>
+                <MarketCell marketId={p.marketId} size={15} className="font-semibold text-[#f5f5f5]" />
               </td>
               <td className="px-3 py-[10px] text-right font-medium font-mono">
                 <span className={positive ? "text-[#1fae5b]" : "text-[#e34c4c]"}>

@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { marketById } from "@/components/common/MarketCell";
+import { priceFor, sizeFor } from "@/lib/format";
 import { useWalletStore } from "@/stores/wallet";
 import { STELLAR_EXPERT_URL, NETWORK_LABEL } from "@/config";
 import { freighterSignAuthEntry, isOnExpectedNetwork } from "@/lib/stellar/freighter";
 import { useQueryClient } from "@tanstack/react-query";
+import { apiFetch } from "@/lib/api";
 
 interface FillNotification {
   id: string;
@@ -35,7 +38,7 @@ function useFillNotifications(address: string | null) {
   const poll = useCallback(async () => {
     if (!address) return;
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/fills?address=${address}&since=${sinceRef.current}&limit=10`,
         { cache: "no-store" }
       );
@@ -66,7 +69,7 @@ function usePendingSettlements(address: string | null) {
   const poll = useCallback(async () => {
     if (!address) return;
     try {
-      const res = await fetch(`/api/settlements?address=${address}`, { cache: "no-store" });
+      const res = await apiFetch(`/api/settlements?address=${address}`, { cache: "no-store" });
       if (!res.ok) return;
       setPending((await res.json()) as PendingSettlement[]);
     } catch { /* best-effort */ }
@@ -145,7 +148,7 @@ function PendingSettlementCard({
         }
         signedAuthEntry = await freighterSignAuthEntry(settlement.authEntryXdr);
       }
-      const res = await fetch(`/api/settlements/${settlement.id}/sign`, {
+      const res = await apiFetch(`/api/settlements/${settlement.id}/sign`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address, signedAuthEntry }),
@@ -191,8 +194,11 @@ function PendingSettlementCard({
       </div>
 
       <div className="px-4 py-3 flex flex-col gap-2">
-        <Row label="Size" value={`${formatRawAmount(settlement.fillSize)} XLM`} />
-        <Row label="Price" value={`$${formatRawPrice(settlement.fillPrice)}`} />
+        <Row
+          label="Size"
+          value={`${sizeFor(settlement.marketId, BigInt(settlement.fillSize))} ${baseAssetOf(settlement.marketId)}`}
+        />
+        <Row label="Price" value={priceFor(settlement.marketId, BigInt(settlement.fillPrice))} />
         <Row
           label="Status"
           value={settlement.retryNeeded ? "Retry settlement" : "Wallet auth required"}
@@ -249,8 +255,11 @@ function FillCard({
       </div>
 
       <div className="px-4 py-3 flex flex-col gap-2">
-        <Row label="Size"  value={`${fill.size} XLM`} />
-        <Row label="Price" value={`$${fill.price}`} />
+        <Row
+          label="Size"
+          value={`${sizeFor(fill.marketId, Number(fill.size))} ${baseAssetOf(fill.marketId)}`}
+        />
+        <Row label="Price" value={priceFor(fill.marketId, Number(fill.price))} />
         <Row
           label="Role"
           value={role}
@@ -279,12 +288,11 @@ function FillCard({
   );
 }
 
-function formatRawPrice(value: string) {
-  return (Number(value) / 1e18).toFixed(4);
-}
-
-function formatRawAmount(value: string) {
-  return (Number(value) / 1e7).toFixed(4);
+// The settlement notification carries a marketId, so the size unit is the
+// market's own base asset — it was hardcoded to "XLM", which mislabels every
+// other market's fill size.
+function baseAssetOf(marketId: number): string {
+  return marketById(marketId)?.baseAsset ?? "";
 }
 
 function Row({

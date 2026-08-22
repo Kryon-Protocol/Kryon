@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { NETWORK } from "@/config";
+import { networkAwareCacheControl, networkFromRequest } from "@/lib/network-server";
 
 const VALID_PERIODS = ["DAY", "WEEK", "MONTH", "ALL"] as const;
 const VALID_METRICS: Record<string, string> = {
@@ -22,7 +22,8 @@ export async function GET(req: NextRequest) {
   const search = sp.get("search")?.trim();
 
   try {
-    const sql = db();
+    const network = networkFromRequest(req);
+    const sql = db(network);
 
     // Total count for pagination
     // Ranked page. orderCol is from a fixed allowlist, so interpolation is safe.
@@ -36,13 +37,13 @@ export async function GET(req: NextRequest) {
       ORDER BY (${orderCol})::numeric DESC
       LIMIT $3 OFFSET $4
     `;
-    const params = search ? [NETWORK.name, period, limit, offset, "%" + search + "%"] : [NETWORK.name, period, limit, offset];
+    const params = search ? [network, period, limit, offset, "%" + search + "%"] : [network, period, limit, offset];
 
     // Count + page in parallel (independent queries → one round-trip latency).
     const [countRows, rows] = await Promise.all([
       search
-        ? sql`SELECT COUNT(*)::int AS c FROM "TraderStat" WHERE network = ${NETWORK.name} AND period = ${period}::"StatsPeriod" AND address ILIKE ${"%" + search + "%"}`
-        : sql`SELECT COUNT(*)::int AS c FROM "TraderStat" WHERE network = ${NETWORK.name} AND period = ${period}::"StatsPeriod"`,
+        ? sql`SELECT COUNT(*)::int AS c FROM "TraderStat" WHERE network = ${network} AND period = ${period}::"StatsPeriod" AND address ILIKE ${"%" + search + "%"}`
+        : sql`SELECT COUNT(*)::int AS c FROM "TraderStat" WHERE network = ${network} AND period = ${period}::"StatsPeriod"`,
       sql.query(query, params),
     ]);
     const total = Number((countRows as Record<string, unknown>[])[0]?.c ?? 0);
@@ -61,7 +62,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(
       { period, metric, total, limit, offset, traders: data },
-      { headers: { "Cache-Control": "s-maxage=10, stale-while-revalidate=30" } }
+      { headers: { "Cache-Control": networkAwareCacheControl(req, "s-maxage=10, stale-while-revalidate=30") } }
     );
   } catch {
     return NextResponse.json(

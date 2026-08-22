@@ -5,13 +5,13 @@ import { useWalletStore } from "@/stores/wallet";
 import { useMarketStore } from "@/stores/market";
 import { getPositions, getAccountHealth, RawPosition } from "@/lib/stellar/contracts";
 import { MARKETS } from "@/config";
-import { priceToHuman, amountToHuman } from "@/lib/format";
+import { priceToHuman, amountToHuman, formatMarketUsd, formatMarketSize } from "@/lib/format";
 import { buildOrderIntent } from "@/lib/market/order-intent";
 import { submitOrder } from "@/lib/market/matcher";
 import { useLocalOrders } from "@/stores/orders";
 import { calcUnrealizedPnl } from "@/lib/math";
 import { useTradeSettings } from "@/stores/settings";
-import { XlmLogo, UsdcLogo } from "@/components/common/AssetLogos";
+import { logoFor, UsdcLogo } from "@/components/common/AssetLogos";
 import { toast } from "sonner";
 import { useState } from "react";
 
@@ -161,13 +161,19 @@ interface PositionView {
   liqPrice: string | null;
   sideBadge: string;
   isLong: boolean;
+  // Pre-formatted at the market's own precision — a shared .toFixed(4) is
+  // wrong by four orders of magnitude on BTC and truncates TRX's finest tick.
+  sizeDisplay: string;
+  entryDisplay: string;
+  markDisplay: string;
 }
 
 // Shared derivation used by both the desktop row and the mobile card.
 function getPositionView(position: RawPosition, markPrice: bigint | undefined, equity: number): PositionView {
+  // MARKETS, not ACTIVE_MARKETS: a position in a de-listed market must still
+  // render legibly rather than collapsing to "#7".
   const market = Object.values(MARKETS).find((m) => m.marketId === position.marketId);
-  const marketName = market?.symbol ?? `#${position.marketId}`;
-  const baseSymbol = marketName.replace("-PERP", "");
+  const baseSymbol = market?.baseAsset ?? `#${position.marketId}`;
 
   const entryHuman = priceToHuman(position.entryPrice);
   const sizeHuman = amountToHuman(position.size);
@@ -198,14 +204,25 @@ function getPositionView(position: RawPosition, markPrice: bigint | undefined, e
       p = (equity + sizeHuman * refPrice) / (sizeHuman * (1 + mm));
     }
     if (!isFinite(p) || p <= 0) return null;
-    return "$" + p.toFixed(4);
+    return market ? formatMarketUsd(market, p) : "$" + p.toFixed(4);
   })();
 
   const sideBadge = position.isLong
     ? "bg-[rgba(31,174,91,0.12)] text-[#1fae5b]"
     : "bg-[rgba(227,76,76,0.12)] text-[#e34c4c]";
 
-  return { baseSymbol, entryHuman, sizeHuman, markHuman, pnlHuman, pnlColor, pnlPct, positionMargin, lev, liqPrice, sideBadge, isLong: position.isLong };
+  // Fall back to 4dp only for an unknown market id — every known market has
+  // its own precision.
+  const px = (v: number) => (market ? formatMarketUsd(market, v) : "$" + v.toFixed(4));
+  const sz = (v: number) => (market ? formatMarketSize(market, v) : v.toFixed(4));
+
+  return {
+    baseSymbol, entryHuman, sizeHuman, markHuman, pnlHuman, pnlColor, pnlPct,
+    positionMargin, lev, liqPrice, sideBadge, isLong: position.isLong,
+    sizeDisplay: sz(sizeHuman),
+    entryDisplay: px(entryHuman),
+    markDisplay: markHuman !== null ? px(markHuman) : "—",
+  };
 }
 
 function PnlValue({ v }: { v: PositionView }) {
@@ -225,7 +242,7 @@ function PnlValue({ v }: { v: PositionView }) {
 function MarketLabel({ v, badge = true }: { v: PositionView; badge?: boolean }) {
   return (
     <div className="flex items-center gap-2">
-      {v.baseSymbol === "XLM" ? <XlmLogo size={16} /> : null}
+      {logoFor(v.baseSymbol, 16)}
       <span className="font-semibold text-[#f5f5f5]">
         {v.baseSymbol}
         <span className="text-[#737373] font-normal">/USDC</span>
@@ -265,13 +282,13 @@ function PositionRow({
       </td>
       <td className="px-3 py-[10px] text-right">
         <span className={`font-semibold ${v.isLong ? "text-[#1fae5b]" : "text-[#e34c4c]"}`}>
-          {v.sizeHuman.toFixed(4)}
+          {v.sizeDisplay}
         </span>{" "}
         <span className="text-[#737373]">{v.baseSymbol}</span>
       </td>
-      <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">${v.entryHuman.toFixed(4)}</td>
+      <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">{v.entryDisplay}</td>
       <td className="px-3 py-[10px] text-right text-[#f5f5f5] font-medium">
-        {v.markHuman !== null ? `$${v.markHuman.toFixed(4)}` : "—"}
+        {v.markDisplay}
       </td>
       {!hidePnl && (
         <td className={`px-3 py-[10px] text-right font-semibold ${v.pnlColor}`}>
@@ -317,7 +334,7 @@ function PositionCard({
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2.5 text-[12.5px] tabular">
         <Field label="Size">
-          <span className={v.isLong ? "text-[#1fae5b]" : "text-[#e34c4c]"}>{v.sizeHuman.toFixed(4)}</span>{" "}
+          <span className={v.isLong ? "text-[#1fae5b]" : "text-[#e34c4c]"}>{v.sizeDisplay}</span>{" "}
           <span className="text-[#737373]">{v.baseSymbol}</span>
         </Field>
         {!hidePnl && (
@@ -326,10 +343,10 @@ function PositionCard({
           </Field>
         )}
         <Field label="Entry">
-          <span className="text-[#f5f5f5]">${v.entryHuman.toFixed(4)}</span>
+          <span className="text-[#f5f5f5]">{v.entryDisplay}</span>
         </Field>
         <Field label="Mark" align="right">
-          <span className="text-[#f5f5f5]">{v.markHuman !== null ? `$${v.markHuman.toFixed(4)}` : "—"}</span>
+          <span className="text-[#f5f5f5]">{v.markDisplay}</span>
         </Field>
         {!hideLiqPrice && (
           <Field label="Liq. Price">

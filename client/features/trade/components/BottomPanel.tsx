@@ -98,7 +98,8 @@ export function BottomPanel({ marketId }: { marketId: number }) {
             {marketMenu && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setMarketMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 z-50 w-[160px] rounded-[8px] border border-[#334155] bg-[#212128] p-1 shadow-[0_10px_30px_rgba(0,0,0,.5)]">
+                {/* max-h + scroll: the list is eight entries long now. */}
+                <div className="absolute right-0 top-full mt-1 z-50 max-h-[280px] w-[160px] overflow-y-auto rounded-[8px] border border-[#334155] bg-[#212128] p-1 shadow-[0_10px_30px_rgba(0,0,0,.5)]">
                   <MenuItem active={marketFilter === "all"} onClick={() => { setMarketFilter("all"); setMarketMenu(false); }}>All markets</MenuItem>
                   {Object.values(ACTIVE_MARKETS).map((m) => (
                     <MenuItem key={m.marketId} active={marketFilter === m.marketId} onClick={() => { setMarketFilter(m.marketId); setMarketMenu(false); }}>

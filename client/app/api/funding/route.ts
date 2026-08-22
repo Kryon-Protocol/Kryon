@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { StrKey } from "@stellar/stellar-sdk";
 import { db } from "@/lib/db";
 import { rateLimit, requestKey } from "@/lib/rate-limit";
-import { NETWORK } from "@/config";
+import { networkFromRequest } from "@/lib/network-server";
 
 const AMOUNT_SCALE = 1e7;
 
@@ -17,11 +17,12 @@ export async function GET(req: NextRequest) {
   }
   const limit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "50", 10), 100);
   try {
-    const sql = db();
+    const network = networkFromRequest(req);
+    const sql = db(network);
     const rows = await sql`
       SELECT "marketId", amount, "txHash", "createdAt"
       FROM "FundingPayment"
-      WHERE network = ${NETWORK.name} AND address = ${address}
+      WHERE network = ${network} AND address = ${address}
       ORDER BY "createdAt" DESC
       LIMIT ${limit}
     `;

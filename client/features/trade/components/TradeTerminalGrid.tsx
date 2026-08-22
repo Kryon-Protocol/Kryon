@@ -69,7 +69,7 @@ export function TradeTerminalGrid({ market }: { market: MarketConfig }) {
         style={{ gridArea: "chart" }}
         className={`${vis("chart")} h-[58dvh] min-h-0 flex-col lg:flex lg:h-full`}
       >
-        <TradeChart symbol={market.tvSymbol} marketId={market.marketId} />
+        <TradeChart market={market} />
       </div>
 
       {/* ── Order book ── */}
@@ -78,7 +78,7 @@ export function TradeTerminalGrid({ market }: { market: MarketConfig }) {
           style={{ gridArea: "book" }}
           className={`${vis("book")} h-[64dvh] min-h-0 flex-col overflow-hidden border border-[#2A2A31] bg-[#19191A] lg:flex lg:h-auto`}
         >
-          <OrderBook marketId={market.marketId} />
+          <OrderBook market={market} />
         </div>
       )}
 

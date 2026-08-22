@@ -1,10 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, withRetry } from "@/lib/db";
-import { ACTIVE_MARKET_SYMBOLS, NETWORK, WS_URL } from "@/config";
+import { ACTIVE_MARKET_SYMBOLS, getWsUrl } from "@/config";
+import { networkFromRequest } from "@/lib/network-server";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const network = networkFromRequest(req);
   try {
-    const sql = db();
+    const sql = db(network);
     await withRetry(async () => {
       await sql`SELECT 1`;
     }, 2);
@@ -12,9 +14,9 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: true,
-        network: NETWORK.name,
+        network,
         markets: ACTIVE_MARKET_SYMBOLS,
-        websocketConfigured: Boolean(WS_URL),
+        websocketConfigured: Boolean(getWsUrl(network)),
         timestamp: new Date().toISOString(),
       },
       { headers: { "Cache-Control": "no-store" } }

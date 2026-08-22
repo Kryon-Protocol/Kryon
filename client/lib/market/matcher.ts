@@ -10,6 +10,7 @@ import {
 } from "./signing-message";
 import { freighterSignMessage } from "@/lib/stellar/freighter";
 import { NETWORK } from "@/config";
+import { apiFetch } from "@/lib/api";
 
 // All order/market data flows through this app's own same-origin API routes
 // (app/api/**). Using relative paths means it works regardless of the dev/prod
@@ -32,7 +33,7 @@ export async function submitOrder(intent: OrderIntent): Promise<{ ok: boolean; e
       ...jsonPayload,
       signature,
     };
-    const res = await fetch(`/api/orders`, {
+    const res = await apiFetch(`/api/orders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -51,7 +52,7 @@ export async function cancelOrderOnMatcher(owner: string, nonce: bigint): Promis
   try {
     const signature = await freighterSignMessage(cancelSigningMessage(owner, nonce), owner);
     const payload: SignedCancelPayload = { owner, nonce: nonce.toString(), signature };
-    await fetch(`/api/orders/cancel`, {
+    await apiFetch(`/api/orders/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -63,7 +64,7 @@ export async function cancelOrderOnMatcher(owner: string, nonce: bigint): Promis
 
 export async function fetchOrderBook(marketId: number): Promise<OrderBook | null> {
   try {
-    const res = await fetch(`/api/markets/${marketId}/orderbook`, { cache: "no-store" });
+    const res = await apiFetch(`/api/markets/${marketId}/orderbook`, { cache: "no-store" });
     if (!res.ok) return null;
     return res.json();
   } catch {
@@ -73,7 +74,7 @@ export async function fetchOrderBook(marketId: number): Promise<OrderBook | null
 
 export async function fetchRecentTrades(marketId: number): Promise<RecentTrade[]> {
   try {
-    const res = await fetch(`/api/markets/${marketId}/trades?limit=50`, { cache: "no-store" });
+    const res = await apiFetch(`/api/markets/${marketId}/trades?limit=50`, { cache: "no-store" });
     if (!res.ok) return [];
     return res.json();
   } catch {

@@ -15,6 +15,7 @@ import { OpenOrdersTable } from "@/features/trade/components/OpenOrdersTable";
 import { OrderHistoryTable } from "@/features/trade/components/OrderHistoryTable";
 import { TradeHistoryTable } from "@/features/trade/components/TradeHistoryTable";
 import { UsdcLogo } from "@/components/common/AssetLogos";
+import { apiFetch } from "@/lib/api";
 
 const TABS = [
   "Balances", "Positions", "Open Orders", "Trade History", "Order History",
@@ -55,7 +56,7 @@ export default function PortfolioPage() {
   const { data: portfolio } = useQuery({
     queryKey: ["portfolio-analytics", address],
     queryFn: async () => {
-      const res = await fetch(`/api/portfolio/${address}`, { cache: "no-store" });
+      const res = await apiFetch(`/api/portfolio/${address}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json() as Promise<{
         analytics: {

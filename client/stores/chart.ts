@@ -8,16 +8,29 @@ const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'vol', type: 'Volume', color: '#3a3d42', visible: true },
 ]
 
-interface ChartStore {
+// Timeframe and chart type are PER MARKET. They used to be two global values
+// under `kryon-chart-v1`, so opening a 1m view on TRX silently reset the 4h
+// view you had on BTC. Drawing tools, price mode and indicators stay global —
+// those are workspace preferences, not per-market view state.
+interface PerMarketView {
   timeframe: Timeframe
   chartType: ChartType
+}
+
+const DEFAULT_VIEW: PerMarketView = { timeframe: '1h', chartType: 'candles' }
+
+interface ChartStore {
+  /** Keyed by market symbol. Absent entries fall back to DEFAULT_VIEW. */
+  views: Record<string, PerMarketView>
   activeTool: DrawingToolType
   priceMode: PriceMode
   indicators: IndicatorConfig[]
   showIndicatorModal: boolean
 
-  setTimeframe: (tf: Timeframe) => void
-  setChartType: (type: ChartType) => void
+  getView: (marketSymbol: string) => PerMarketView
+  setTimeframe: (marketSymbol: string, tf: Timeframe) => void
+  setChartType: (marketSymbol: string, type: ChartType) => void
+  resetView: (marketSymbol: string) => void
   setActiveTool: (tool: DrawingToolType) => void
   setPriceMode: (mode: PriceMode) => void
   addIndicator: (config: IndicatorConfig) => void
@@ -29,16 +42,24 @@ interface ChartStore {
 
 export const useChartStore = create<ChartStore>()(
   persist(
-    (set) => ({
-      timeframe: '1h',
-      chartType: 'candles',
+    (set, get) => ({
+      views: {},
       activeTool: 'pointer',
       priceMode: 'last',
       indicators: DEFAULT_INDICATORS,
       showIndicatorModal: false,
 
-      setTimeframe: (tf) => set({ timeframe: tf }),
-      setChartType: (type) => set({ chartType: type }),
+      getView: (marketSymbol) => get().views[marketSymbol] ?? DEFAULT_VIEW,
+      setTimeframe: (marketSymbol, tf) =>
+        set((s) => ({
+          views: { ...s.views, [marketSymbol]: { ...(s.views[marketSymbol] ?? DEFAULT_VIEW), timeframe: tf } },
+        })),
+      setChartType: (marketSymbol, type) =>
+        set((s) => ({
+          views: { ...s.views, [marketSymbol]: { ...(s.views[marketSymbol] ?? DEFAULT_VIEW), chartType: type } },
+        })),
+      resetView: (marketSymbol) =>
+        set((s) => ({ views: { ...s.views, [marketSymbol]: DEFAULT_VIEW } })),
       setActiveTool: (tool) => set({ activeTool: tool }),
       setPriceMode: (mode) => set({ priceMode: mode }),
       addIndicator: (config) => set(s => ({ indicators: [...s.indicators, config] })),
@@ -53,6 +74,11 @@ export const useChartStore = create<ChartStore>()(
         })),
       setShowIndicatorModal: (show) => set({ showIndicatorModal: show }),
     }),
-    { name: 'kryon-chart-v1' }
+    {
+      // v2: the persisted shape changed from two globals (timeframe, chartType)
+      // to a per-market `views` map. A new key rather than a migration — the
+      // old value carried no information worth preserving beyond a default.
+      name: 'kryon-chart-v2',
+    }
   )
 )

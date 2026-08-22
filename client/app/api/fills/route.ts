@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { StrKey } from "@stellar/stellar-sdk";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 import { rateLimit, requestKey } from "@/lib/rate-limit";
 
 const PRICE_SCALE  = 1e18;
@@ -20,7 +21,7 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "20", 10), 50);
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
     const sinceDate = since ? new Date(parseInt(since, 10)) : new Date(Date.now() - 24 * 3600 * 1000);
 
     const rows = await sql`

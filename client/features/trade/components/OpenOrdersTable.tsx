@@ -4,9 +4,10 @@ import { useWalletStore } from "@/stores/wallet";
 import { useLocalOrders } from "@/stores/orders";
 import { cancelOrder as cancelOnChain } from "@/lib/stellar/contracts";
 import { cancelOrderOnMatcher } from "@/lib/market/matcher";
-import { priceToHuman, amountToHuman } from "@/lib/format";
-import { MARKETS } from "@/config";
-import { XlmLogo } from "@/components/common/AssetLogos";
+import { priceToHuman, amountToHuman, formatMarketUsd, formatMarketSize } from "@/lib/format";
+
+import { logoFor } from "@/components/common/AssetLogos";
+import { marketById } from "@/components/common/MarketCell";
 import { toast } from "sonner";
 import { useState } from "react";
 
@@ -84,15 +85,22 @@ export function OpenOrdersTable({
 type OrderType = ReturnType<typeof useLocalOrders.getState>["orders"][number];
 
 function orderView(order: OrderType) {
-  const marketName =
-    Object.values(MARKETS).find((m) => m.marketId === order.marketId)?.symbol ?? `#${order.marketId}`;
-  const baseSymbol = marketName.replace("-PERP", "");
+  const market = marketById(order.marketId);
+  const baseSymbol = market?.baseAsset ?? `#${order.marketId}`;
+  const quoteAsset = market?.quoteAsset ?? "USDC";
   const isMarket = order.limitPrice === 0n;
   return {
     baseSymbol,
+    quoteAsset,
     isMarket,
-    priceDisplay: isMarket ? "Market" : `$${priceToHuman(order.limitPrice).toFixed(4)}`,
-    sizeDisplay: amountToHuman(order.size).toFixed(4),
+    priceDisplay: isMarket
+      ? "Market"
+      : market
+      ? formatMarketUsd(market, order.limitPrice)
+      : `$${priceToHuman(order.limitPrice).toFixed(4)}`,
+    sizeDisplay: market
+      ? formatMarketSize(market, order.size)
+      : amountToHuman(order.size).toFixed(4),
     sideBadge: order.isLong
       ? "bg-[rgba(31,174,91,0.12)] text-[#1fae5b]"
       : "bg-[rgba(227,76,76,0.12)] text-[#e34c4c]",
@@ -106,10 +114,10 @@ function OrderCard({ order, onCancel }: { order: OrderType; onCancel: () => void
     <div className="rounded-[10px] border border-[#2A2A31] bg-[#212128] p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          {v.baseSymbol === "XLM" ? <XlmLogo size={16} /> : null}
+          {logoFor(v.baseSymbol, 16)}
           <span className="font-semibold text-[#f5f5f5]">
             {v.baseSymbol}
-            <span className="text-[#737373] font-normal">/USDC</span>
+            <span className="text-[#737373] font-normal">/{v.quoteAsset}</span>
           </span>
           <span className={`rounded-[5px] px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${v.sideBadge}`}>
             {order.isLong ? "LONG" : "SHORT"}
@@ -172,27 +180,19 @@ function OrderRow({
 }) {
   const [cancelling, setCancelling] = useState(false);
 
-  const marketName =
-    Object.values(MARKETS).find((m) => m.marketId === order.marketId)?.symbol ??
-    `#${order.marketId}`;
-  const baseSymbol = marketName.replace("-PERP", "");
+  const v = orderView(order);
+  const { baseSymbol, isMarket, priceDisplay, sizeDisplay } = v;
 
-  const isMarket = order.limitPrice === 0n;
-  const priceDisplay = isMarket ? "Market" : `$${priceToHuman(order.limitPrice).toFixed(4)}`;
-  const sizeDisplay = amountToHuman(order.size).toFixed(4);
-
-  const sideBadge = order.isLong
-    ? "bg-[rgba(31,174,91,0.12)] text-[#1fae5b]"
-    : "bg-[rgba(227,76,76,0.12)] text-[#e34c4c]";
+  const sideBadge = v.sideBadge;
 
   return (
     <tr className="border-t border-[#2A2A31] hover:bg-white/[0.02] transition-colors">
       <td className="pl-4 pr-2 py-[10px] text-left">
         <div className="flex items-center gap-2">
-          {baseSymbol === "XLM" ? <XlmLogo size={16} /> : null}
+          {logoFor(baseSymbol, 16)}
           <span className="font-semibold text-[#f5f5f5]">
             {baseSymbol}
-            <span className="text-[#737373] font-normal">/USDC</span>
+            <span className="text-[#737373] font-normal">/{v.quoteAsset}</span>
           </span>
         </div>
       </td>

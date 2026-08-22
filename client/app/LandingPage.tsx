@@ -7,10 +7,11 @@ import { useWalletStore } from '@/stores/wallet';
 import { freighterConnect, freighterIsInstalled } from '@/lib/stellar/freighter';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { toast } from 'sonner';
-import { NETWORK_LABEL } from '@/config';
+import { ACTIVE_MARKET_SYMBOLS, DEFAULT_MARKET_SYMBOL, NETWORK_LABEL } from '@/config';
+import { useNetwork } from '@/features/network/NetworkContext';
 
 const LANDING_NAV = [
-  { to: '/trade/XLM-PERP', label: 'Trade' },
+  { to: `/trade/${DEFAULT_MARKET_SYMBOL}`, label: 'Trade' },
   { to: '/portfolio', label: 'Portfolio' },
   { to: '/leaderboard', label: 'Leaderboard' },
   // Docs is a static Docusaurus build served from this same deployment at /docs.
@@ -25,8 +26,11 @@ const SYSTEM_STATUS = [
   '09. Funding', '10. State Indexer',
 ];
 
-const HEADLINES = [
-  { title: `XLM-PERP Now Live on ${NETWORK_LABEL}`, desc: 'USDC-settled perpetual futures with on-chain margin and settlement — trade self-custodial straight from your Freighter wallet.' },
+// A function, not a const: the first headline names the selected network, which
+// is only known per-render. Building it at module scope would bake in the
+// deployment's own network and hydrate-mismatch for anyone on the other venue.
+const buildHeadlines = (networkLabel: string) => [
+  { title: `${ACTIVE_MARKET_SYMBOLS.length} Perpetual Markets Live on ${networkLabel}`, desc: `${ACTIVE_MARKET_SYMBOLS.map((s) => s.replace('-PERP', '')).join(' · ')} — USDC-settled perpetual futures with on-chain margin and settlement, traded self-custodial straight from your Freighter wallet.` },
   { title: 'Kryon Brings Perpetuals to Stellar', desc: 'A decentralized exchange pairing an off-chain central-limit order book with a fully on-chain margin and settlement engine on Soroban.' },
   { title: 'Sub-Second Fills, On-Chain Truth', desc: 'Price-time matching off-chain for a familiar low-latency perp experience, with custody, margin, and settlement enforced on-chain.' },
 ];
@@ -219,6 +223,9 @@ function SolSvg({ idx }: { idx: number; active: boolean }) {
 export function LandingPage() {
   const router = useRouter();
   const { connected, connecting, setConnecting, setAddress, setConnected, setWrongNetwork } = useWalletStore();
+  // Server-seeded, so the network-named headline matches on hydration.
+  const { config: networkConfig } = useNetwork();
+  const headlines = buildHeadlines(networkConfig.label);
 
   const [activeStatus, setActiveStatus] = useState(0);
   const [binaryRows, setBinaryRows] = useState<string[]>(INITIAL_BINARY);
@@ -319,7 +326,7 @@ export function LandingPage() {
   }
 
   async function handleConnect() {
-    if (connected) { router.push('/trade/XLM-PERP'); return; }
+    if (connected) { router.push(`/trade/${DEFAULT_MARKET_SYMBOL}`); return; }
     const installed = await freighterIsInstalled();
     if (!installed) {
       toast.error('Freighter not found — install from freighter.app then refresh.');
@@ -335,7 +342,7 @@ export function LandingPage() {
       setWrongNetwork(!ok);
       if (!ok) toast.warning(`Switch Freighter to ${NETWORK_LABEL}.`);
       else toast.success('Wallet connected');
-      router.push('/trade/XLM-PERP');
+      router.push(`/trade/${DEFAULT_MARKET_SYMBOL}`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -461,7 +468,7 @@ export function LandingPage() {
             </div>
 
             <div className="s5-cards-block s5-reveal" ref={cardsRef}>
-              {HEADLINES.map((h, i) => (
+              {headlines.map((h, i) => (
                 <a key={i} className="s5-headline-card" href="#" style={{ transitionDelay: `${i * 0.12}s` }}>
                   <h3 className="s5-headline-title">{h.title}</h3>
                   <p className="s5-headline-desc">{h.desc}</p>
@@ -519,7 +526,7 @@ export function LandingPage() {
               </div>
             </div>
 
-            <Link href="/trade/XLM-PERP" className="s5-right-cta">
+            <Link href={`/trade/${DEFAULT_MARKET_SYMBOL}`} className="s5-right-cta">
               <img src="/images/arrow.png" alt="" className="s5-cta-arrow-img" />
               <p className="s5-explore-text">Explore the platform.</p>
             </Link>
@@ -644,7 +651,7 @@ export function LandingPage() {
               <div>
                 <h3 className="s5-footer-col-h">Platform</h3>
                 <ul className="s5-footer-col-list">
-                  <li><span className="s5-footer-col-arrow">↳</span><Link href="/trade/XLM-PERP" className="text-inherit">Trade</Link></li>
+                  <li><span className="s5-footer-col-arrow">↳</span><Link href={`/trade/${DEFAULT_MARKET_SYMBOL}`} className="text-inherit">Trade</Link></li>
                   <li><span className="s5-footer-col-arrow">↳</span><Link href="/portfolio" className="text-inherit">Portfolio</Link></li>
                   <li><span className="s5-footer-col-arrow">↳</span><Link href="/leaderboard" className="text-inherit">Leaderboard</Link></li>
                 </ul>

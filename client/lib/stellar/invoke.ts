@@ -2,10 +2,7 @@
 
 import {
   TransactionBuilder,
-  TimeoutInfinite,
   Transaction,
-  Account,
-  Keypair,
   Contract,
   rpc,
   xdr,
@@ -15,17 +12,6 @@ import { freighterSignTx } from "./freighter";
 
 const FEE = "500000"; // 0.05 XLM — generous for Soroban ops
 const TIMEOUT = 30;
-
-// Synthetic keypair for read simulation — Soroban RPC validates tx structure
-// but does NOT require the source account to exist on-chain for simulation.
-// Generate once per session so sequence numbers stay consistent.
-let _simKp: InstanceType<typeof Keypair> | null = null;
-let _simSeq = 100;
-
-function getSimAccount(): InstanceType<typeof Account> {
-  if (!_simKp) _simKp = Keypair.random();
-  return new Account(_simKp.publicKey(), (_simSeq++).toString());
-}
 
 export async function simulate(
   txXdr: string
@@ -95,25 +81,6 @@ export async function invokeContract(
   throw new Error("Transaction polling timeout");
 }
 
-export async function simulateRead(
-  contractId: string,
-  method: string,
-  args: xdr.ScVal[],
-  dummySource?: string
-): Promise<xdr.ScVal | null> {
-  void dummySource;
-  const server = getRpcServer();
-  // Use synthetic account — simulation validates tx structure, not source existence
-  const account = getSimAccount();
-  const contract = new Contract(contractId);
-
-  const tx = new TransactionBuilder(account, { fee: FEE, networkPassphrase: NETWORK_PASSPHRASE })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(TimeoutInfinite)
-    .build();
-
-  const sim = await server.simulateTransaction(tx);
-  if (rpc.Api.isSimulationError(sim)) return null;
-  const success = sim as rpc.Api.SimulateTransactionSuccessResponse;
-  return success.result?.retval ?? null;
-}
+// simulateRead lives in ./simulate (no browser-only imports) so keepers and
+// scripts share one implementation. Re-exported here for existing callers.
+export { simulateRead } from "./simulate";

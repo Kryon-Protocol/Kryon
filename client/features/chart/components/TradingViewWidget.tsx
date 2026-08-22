@@ -46,11 +46,13 @@ const UP = "#1fae5b";
 const DOWN = "#e34c4c";
 
 export const TradingViewWidget = memo(function TradingViewWidget({
-  symbol = "COINBASE:XLMUSD",
+  symbol,
   interval = "60",
   chartStyle = "1",
 }: {
-  symbol?: string;
+  // REQUIRED. This defaulted to "COINBASE:XLMUSD", so any caller that failed
+  // to thread a symbol through charted XLM under another market's header.
+  symbol: string;
   interval?: string;
   chartStyle?: string;
 }) {

@@ -15,7 +15,7 @@ export default async function TradePage({
   if (!marketConfig) redirect(`/trade/${DEFAULT_MARKET_SYMBOL}`);
 
   return (
-    <MarketDataProvider marketId={marketConfig.marketId}>
+    <MarketDataProvider market={marketConfig}>
       <SettlementModal />
 
       {/* Mobile/tablet: the page scrolls vertically (min-h-dvh). Desktop (lg+):

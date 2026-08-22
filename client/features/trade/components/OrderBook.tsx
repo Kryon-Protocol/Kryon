@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useMarketStore } from "@/stores/market";
 import type { OrderBookLevel } from "@/lib/market/matcher";
-import { UsdcLogo, XlmLogo } from "@/components/common/AssetLogos";
+import { UsdcLogo, logoFor } from "@/components/common/AssetLogos";
+import type { MarketConfig } from "@/config";
 import { Shuffle } from "lucide-react";
 const CaretIcon = () => (
   <svg width={9} height={9} viewBox="0 0 12 12" fill="currentColor">
@@ -11,7 +12,6 @@ const CaretIcon = () => (
   </svg>
 );
 
-const TICKS = [0.0001, 0.001, 0.01, 0.1];
 type ViewMode = "both" | "asks" | "bids";
 
 interface LevelRow {
@@ -36,12 +36,17 @@ function groupByTick(levels: OrderBookLevel[], tick: number, isBid: boolean): { 
   return out;
 }
 
-export function OrderBook({ marketId }: { marketId: number }) {
+export function OrderBook({ market }: { market: MarketConfig }) {
+  const marketId = market.marketId;
+  // The aggregation ladder is per asset — a $0.20 tick ladder is useless on a
+  // $77,000 book. Comes from MarketConfig.tickSizes.
+  const TICKS = market.tickSizes;
   const [activeTab, setActiveTab] = useState<"Order Book" | "Trades">("Order Book");
   const [hover, setHover] = useState<HoverState>(null);
-  const [tickIdx, setTickIdx] = useState(1);
+  // Default to the second-finest tick, clamped for markets with a short ladder.
+  const [tickIdx, setTickIdx] = useState(() => Math.min(1, TICKS.length - 1));
   const [tickOpen, setTickOpen] = useState(false);
-  const [denomQuote, setDenomQuote] = useState(true); // false = base (XLM), true = quote (USDC)
+  const [denomQuote, setDenomQuote] = useState(true); // false = base asset, true = quote (USDC)
   const [viewMode, setViewMode] = useState<ViewMode>("both");
 
   const book = useMarketStore((s) => s.orderBooks[marketId]);
@@ -49,10 +54,14 @@ export function OrderBook({ marketId }: { marketId: number }) {
   const setSelectedPrice = useMarketStore((s) => s.setSelectedPrice);
   const trades = tradesRaw ?? [];
 
-  const tick = TICKS[tickIdx];
-  const unit = denomQuote ? "USDC" : "XLM";
+  // Switching markets can leave tickIdx past the end of a shorter ladder.
+  const safeTickIdx = Math.min(tickIdx, TICKS.length - 1);
+  const tick = TICKS[safeTickIdx];
+  const unit = denomQuote ? market.quoteAsset : market.baseAsset;
   const depth = viewMode === "both" ? 10 : 22;
-  const priceDecimals = Math.max(0, Math.ceil(-Math.log10(tick)));
+  // Enough decimals to render the chosen tick, but never fewer than the
+  // market's own display precision.
+  const priceDecimals = Math.max(market.priceDecimals, Math.ceil(-Math.log10(tick)));
   const tradeMetric = (price: string, size: string) => {
     const p = parseFloat(price);
     const s = parseFloat(size);
@@ -169,7 +178,7 @@ export function OrderBook({ marketId }: { marketId: number }) {
                   className="flex items-center gap-[7px] hover:text-[#f5f5f5] transition-colors"
                   onClick={() => setTickOpen((v) => !v)}
                 >
-                  {tick} <CaretIcon />
+                  {formatTick(tick)} <CaretIcon />
                 </button>
                 {tickOpen && (
                   <>
@@ -180,10 +189,10 @@ export function OrderBook({ marketId }: { marketId: number }) {
                           key={t}
                           onClick={() => { setTickIdx(i); setTickOpen(false); }}
                           className={`block w-full text-left px-3 py-[5px] rounded-[5px] transition-colors ${
-                            i === tickIdx ? "text-[#f5f5f5] bg-[#212128]" : "text-[#a3a3a3] hover:text-[#f5f5f5] hover:bg-[#212128]"
+                            i === safeTickIdx ? "text-[#f5f5f5] bg-[#212128]" : "text-[#a3a3a3] hover:text-[#f5f5f5] hover:bg-[#212128]"
                           }`}
                         >
-                          {t}
+                          {formatTick(t)}
                         </button>
                       ))}
                     </div>
@@ -197,7 +206,7 @@ export function OrderBook({ marketId }: { marketId: number }) {
                 onClick={() => setDenomQuote((v) => !v)}
                 title="Toggle size denomination"
               >
-                {denomQuote ? <UsdcLogo size={13} /> : <XlmLogo size={13} />} {unit}{" "}
+                {denomQuote ? <UsdcLogo size={13} /> : logoFor(market.baseAsset, 13)} {unit}{" "}
                 <Shuffle size={13} className="text-[#a3a3a3]" />
               </button>
               <button
@@ -263,7 +272,7 @@ export function OrderBook({ marketId }: { marketId: number }) {
                   onClick={() => setSelectedPrice(marketId, parseFloat(t.price))}
                 >
                   <span className={t.side === "buy" ? "text-[#54bd7c]" : "text-[#e06a6a]"}>
-                    {parseFloat(t.price).toFixed(4)}
+                    {parseFloat(t.price).toFixed(market.priceDecimals)}
                   </span>
                   <span className="text-right text-[#f5f5f5]">
                     {fmt(tradeMetric(t.price, t.size))}
@@ -286,6 +295,11 @@ export function OrderBook({ marketId }: { marketId: number }) {
 }
 
 type HoverState = { side: "ask" | "bid"; idx: number } | null;
+
+// toFixed, not String(): String(0.00001) is "1e-5".
+function formatTick(t: number): string {
+  return t.toFixed(Math.max(0, Math.ceil(-Math.log10(t))));
+}
 
 function fmt(n: number): string {
   return n >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : n.toFixed(2);

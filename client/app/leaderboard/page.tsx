@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { TopNav } from "@/components/common/TopNav";
 import { shortenAddress } from "@/lib/format";
+import { apiFetch } from "@/lib/api";
 
 const CaretIcon = () => (
   <svg width={10} height={10} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -63,7 +64,7 @@ export default function LeaderboardPage() {
         offset: String(page * pageSize),
       });
       if (search.trim()) params.set("search", search.trim());
-      const res = await fetch(`/api/leaderboard?${params}`, { cache: "no-store" });
+      const res = await apiFetch(`/api/leaderboard?${params}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     },

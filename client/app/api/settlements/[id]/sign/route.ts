@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { Keypair, StrKey, TransactionBuilder, xdr, rpc as sorobanRpc } from "@stellar/stellar-sdk";
-import { NETWORK } from "@/config";
+import { matcherOperatorSecret, networkConfigFromRequest, networkFromRequest } from "@/lib/network-server";
 import { bodyTooLarge, rateLimit, requestKey } from "@/lib/rate-limit";
 
 export async function POST(
@@ -31,7 +31,9 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "Too many settlement requests" }, { status: 429 });
   }
 
-  const sql = db();
+  const network = networkFromRequest(req);
+  const networkConfig = networkConfigFromRequest(req);
+  const sql = db(network);
   const rows = await sql`
     SELECT id, "payloadHash", "unsignedXdr", status
     FROM "TxJob"
@@ -123,12 +125,12 @@ export async function POST(
   // The assembled tx XDR was created at match time; the matcher operator may have submitted
   // other transactions since then, advancing their sequence and making the stored XDR invalid.
   try {
-    const server = new sorobanRpc.Server(NETWORK.rpcUrl);
+    const server = new sorobanRpc.Server(networkConfig.rpcUrl);
     // Key separation: the settlement fee payer is ONLY the matcher operator.
     // Never fall back to the oracle key — one key must never serve two roles.
-    const feePayerSecret = process.env.MATCHER_OPERATOR_SECRET;
+    const feePayerSecret = matcherOperatorSecret(network);
     if (!feePayerSecret) {
-      return NextResponse.json({ ok: false, error: "Missing matcher fee-payer secret" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: `Missing matcher fee-payer secret for ${network}` }, { status: 500 });
     }
     const feeKp = Keypair.fromSecret(feePayerSecret);
 
@@ -144,7 +146,7 @@ export async function POST(
     // Rebuild tx with fresh sequence but original op + resource footprint
     const rebuilt = new TransactionBuilder(freshAccount, {
       fee: String(storedTxBody.fee()),
-      networkPassphrase: NETWORK.passphrase,
+      networkPassphrase: networkConfig.passphrase,
     })
       .addOperation(op)
       .setSorobanData(sorobanData)

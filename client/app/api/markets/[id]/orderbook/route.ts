@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { networkFromRequest } from "@/lib/network-server";
 
 // Reconstruct live orderbook from resting (unfilled, uncancelled) limit orders.
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -11,7 +12,7 @@ export async function GET(
   if (!marketId) return NextResponse.json(null, { status: 400 });
 
   try {
-    const sql = db();
+    const sql = db(networkFromRequest(req));
     const PRECISION = 1e18;
     const AMOUNT_PRECISION = 1e7;
 
