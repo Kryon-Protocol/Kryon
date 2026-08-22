@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 
 async function main() {
   const sql = neon(process.env.DATABASE_URL!);

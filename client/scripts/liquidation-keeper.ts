@@ -33,7 +33,7 @@ import {
   rpc as sorobanRpc,
 } from "@stellar/stellar-sdk";
 import { StrKey } from "@stellar/stellar-sdk";
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "../lib/sql";
 import { ACTIVE_MARKETS, ASSETS, CONTRACTS, NETWORK } from "../config";
 import { assertNoPublicSecretLeak, assertRequiredSecrets } from "../lib/secrets-check";
 
@@ -211,7 +211,17 @@ async function liquidateAccount(
 
   for (const pos of ranked) {
     const symbol = ORACLE_SYMBOL_BY_MARKET.get(pos.market_id);
-    if (!symbol) continue;
+    if (!symbol) {
+      // Correct to skip — we have no price for a market we do not track — but
+      // NEVER silently. An unliquidated position in a de-listed market is bad
+      // debt accruing with nothing watching it.
+      console.error(
+        `  ⚠ position ${pos.position_id} (${user.slice(0, 8)}…) is in market ${pos.market_id}, ` +
+        `which is NOT in ACTIVE_MARKETS — cannot liquidate, skipping. ` +
+        `If this market was de-listed, its open positions are unmanaged bad-debt risk.`
+      );
+      continue;
+    }
     const price = await oraclePrice(server, symbol);
     if (!price || price <= 0n) {
       console.error(`  no fresh oracle price for market ${pos.market_id} — skipping`);

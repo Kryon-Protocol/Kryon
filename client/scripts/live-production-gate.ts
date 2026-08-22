@@ -8,8 +8,11 @@ type CheckResult = {
 // On testnet the WS server runs locally — allow ws: as well as wss:
 const IS_TESTNET = process.env.NEXT_PUBLIC_STELLAR_NETWORK === "testnet";
 
+import { ACTIVE_MARKETS } from "../config";
+
 const APP_URL = requiredUrl("NEXT_PUBLIC_APP_URL", process.env.NEXT_PUBLIC_APP_URL);
 const WS_URL = requiredWsUrl("NEXT_PUBLIC_WS_URL", process.env.NEXT_PUBLIC_WS_URL);
+
 const MARKET_ID = Number(process.env.LIVE_GATE_MARKET_ID ?? "1");
 const WS_CONNECTIONS = Number(process.env.LIVE_GATE_WS_CONNECTIONS ?? "25");
 const SOAK_SECONDS = Number(process.env.LIVE_GATE_SOAK_SECONDS ?? "30");
@@ -63,8 +66,26 @@ async function expectStatus(path: string, expected: number | number[], init?: Re
   return res;
 }
 
+/**
+ * Every active market's trade route must render. A single hardcoded
+ * /trade/XLM-PERP passed happily while seven other markets 404'd or redirected
+ * — the gate has to cover what the switcher actually offers.
+ */
+async function checkAllMarketRoutes() {
+  const markets = Object.values(ACTIVE_MARKETS);
+  for (const m of markets) {
+    await expectStatus(`/trade/${m.symbol}`, 200);
+    await expectStatus(`/api/markets/${m.marketId}`, 200);
+    await expectStatus(`/api/markets/${m.marketId}/orderbook`, 200);
+    await expectStatus(`/api/markets/${m.marketId}/trades`, 200);
+    await expectStatus(`/api/markets/${m.marketId}/candles`, 200);
+  }
+  return `${markets.length} market route(s) + APIs OK`;
+}
+
 async function checkSecurityHeaders() {
-  const res = await expectStatus("/trade/XLM-PERP", 200);
+  // Headers are route-independent; check them on the default market.
+  const res = await expectStatus(`/trade/${Object.values(ACTIVE_MARKETS)[0].symbol}`, 200);
   const csp = res.headers.get("content-security-policy") ?? "";
   if (!csp.includes("frame-ancestors 'none'")) fail("CSP missing frame-ancestors lock");
   if (csp.includes("'unsafe-eval'")) fail("CSP still allows unsafe-eval");
@@ -155,6 +176,7 @@ async function main() {
 
   const results = await Promise.all([
     timed("security headers", checkSecurityHeaders),
+    timed("all market routes", checkAllMarketRoutes),
     timed("core api readiness", checkCoreApis),
     timed("distributed rate limit", checkRateLimit),
   ]);

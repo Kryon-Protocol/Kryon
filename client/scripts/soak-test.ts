@@ -9,7 +9,7 @@
  */
 
 import { Keypair, Account, Contract, TransactionBuilder, nativeToScVal, Address, xdr, rpc as sorobanRpc, authorizeEntry, hash, Horizon, Networks, Operation, Asset, BASE_FEE } from "@stellar/stellar-sdk";
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { execSync } from "child_process";
 import { CONTRACTS, ASSETS, NETWORK } from "../config";
 import { orderSettlementMessage, pubkeyHexFromAddress } from "../lib/market/signing-message";
@@ -188,7 +188,7 @@ async function main() {
       const tSigned = await signAndSubmit(server, takerKp, job.takerAuthXdr);
 
       // Direct on-chain submission (avoids stale-sequence bug in API route)
-      const { neon: neonDirect } = await import("@neondatabase/serverless");
+      const { neon: neonDirect } = await import("../lib/sql");
       const dbDirect = neonDirect(process.env.DATABASE_URL!);
       const jobRows = await dbDirect`SELECT "unsignedXdr" FROM "TxJob" WHERE id = ${job.id}`;
       const jobData = JSON.parse(jobRows[0].unsignedXdr as string);

@@ -9,6 +9,14 @@
  *   - If the surviving sources disagree by more than
  *     ORACLE_MAX_SOURCE_DEVIATION_BPS (default 200 = 2%), the tick is skipped:
  *     a stale-but-honest price (engine halts on staleness) beats a wrong one.
+ *   - Reflector is a FOURTH, INDEPENDENT cross-check (never the mark — its
+ *     300s resolution is far outside the 120s on-chain staleness guard). If
+ *     the CEX median diverges from Reflector's lastprice by more than
+ *     REFLECTOR_DIVERGENCE_HALT_BPS, publication for that market HALTS and the
+ *     on-chain OracleGuard fail-stops settlement. An attacker who moves all
+ *     three CEX feeds still has to move Reflector's node consensus. Markets
+ *     without a `reflectorSymbol` (BNB, TRX — absent from Reflector) run on
+ *     the CEX median alone.
  *   - USDC is SOURCED, not assumed at $1. If the sourced price departs the peg
  *     by more than USDC_DEPEG_HALT_BPS (default 100 = 1%), USDC publication
  *     halts — collateral valuation goes stale and settlement fail-stops rather
@@ -21,6 +29,12 @@
  * Usage:
  *   ORACLE_PUBLISHER_SECRET=S... npx tsx scripts/oracle-keeper.ts
  *   or via package.json: npm run dev:oracle
+ *
+ *   npx tsx scripts/oracle-keeper.ts --dry-run
+ *     One pass, no signing, no DB, no secrets: prints per market the 3-source
+ *     median, the Reflector price, the divergence in bps and the resulting
+ *     publish/skip decision. Use it to validate feed coverage before wiring a
+ *     new market.
  */
 
 import {
@@ -31,11 +45,15 @@ import {
   xdr,
   rpc as sorobanRpc,
 } from "@stellar/stellar-sdk";
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { ACTIVE_MARKETS, CONTRACTS, NETWORK } from "../config";
+import { divergenceBps, reflectorContractId, reflectorLastPrice } from "../lib/stellar/reflector";
 import { checkProtocolActivity } from "../lib/oracle-activity";
 import { assertRequiredSecrets, assertNoPublicSecretLeak } from "../lib/secrets-check";
-assertRequiredSecrets(["DATABASE_URL", "ORACLE_PUBLISHER_SECRET"]);
+// --dry-run only reads public price feeds and the Reflector contract; it never
+// signs or submits, so it needs neither the publisher key nor the database.
+const DRY_RUN = process.argv.includes("--dry-run");
+if (!DRY_RUN) assertRequiredSecrets(["DATABASE_URL", "ORACLE_PUBLISHER_SECRET"]);
 assertNoPublicSecretLeak();
 
 const PRICE_PRECISION = BigInt("1000000000000000000"); // 1e18
@@ -57,11 +75,44 @@ const IDLE_GRACE_SECS = Number(process.env.IDLE_GRACE_SECS ?? "900");
 const MIN_SOURCES = Number(process.env.ORACLE_MIN_SOURCES ?? "2");
 const MAX_SOURCE_DEVIATION_BPS = Number(process.env.ORACLE_MAX_SOURCE_DEVIATION_BPS ?? "200");
 const USDC_DEPEG_HALT_BPS = Number(process.env.USDC_DEPEG_HALT_BPS ?? "100");
+// Reflector cross-check. Disabled per-market when the market has no
+// `reflectorSymbol`; disabled globally with REFLECTOR_GUARD_ENABLED=false.
+const REFLECTOR_GUARD_ENABLED = (process.env.REFLECTOR_GUARD_ENABLED ?? "true") !== "false";
+const REFLECTOR_DIVERGENCE_HALT_BPS = Number(process.env.REFLECTOR_DIVERGENCE_HALT_BPS ?? "300");
+// Ignore Reflector beyond two of its 300s resolutions — a stale cross-check
+// is no cross-check, and blocking on one would halt the venue for free.
+const REFLECTOR_MAX_AGE_SECS = Number(process.env.REFLECTOR_MAX_AGE_SECS ?? "600");
+// Eight markets on one publisher account race the sequence number. Space the
+// per-market publishes across the fetch window instead of firing them back to
+// back. Kept well inside FETCH_INTERVAL_MS so a tick still finishes in time.
+const PUBLISH_STAGGER_MS = Number(process.env.PUBLISH_STAGGER_MS ?? "400");
+/**
+ * Backdate publish_time so it is never AHEAD of the ledger clock.
+ *
+ * write_price runs `snapshot.validate(env.ledger().timestamp(), guard)`, whose
+ * first check is `publish_time > now → StaleOracle` (protocol-core/oracle.rs:36).
+ * During simulation `now` is the LAST CLOSED ledger's close time, which trails
+ * wall clock by up to a full ledger (~6s on mainnet). Stamping publish_time
+ * with `Date.now()` therefore puts it in the future and EVERY publish
+ * fail-stops with Error(Contract, #6) — which is why mainnet published nothing.
+ *
+ * Verified against mainnet 2026-08-22: now-0s and now-5s fail; now-10s and
+ * older simulate cleanly. 15s carries margin over a slow ledger while staying
+ * far inside the 120s OracleGuard, so the published price is still fresh.
+ */
+const PUBLISH_TIME_BACKDATE_SECS = Number(process.env.PUBLISH_TIME_BACKDATE_SECS ?? "15");
+
+/** Ledger-safe publish timestamp: wall clock, backdated past the ledger lag. */
+function ledgerSafePublishTime(): bigint {
+  return BigInt(Math.floor(Date.now() / 1000) - PUBLISH_TIME_BACKDATE_SECS);
+}
 const ORACLE_MARKETS = Object.values(ACTIVE_MARKETS).map((m) => ({
   symbol: m.symbol,
   oracleSymbol: m.oracleSymbol,
   baseAsset: m.baseAsset,
   priceSourceSymbol: m.priceSourceSymbol,
+  reflectorSymbol: m.reflectorSymbol,
+  priceDecimals: m.priceDecimals,
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -165,7 +216,7 @@ async function aggregatePrice(
   return {
     price,
     confidence,
-    publishTime: BigInt(Math.floor(Date.now() / 1000)),
+    publishTime: ledgerSafePublishTime(),
     sources: prices.length,
   };
 }
@@ -174,13 +225,14 @@ async function aggregatePrice(
 
 async function run() {
   const secret = process.env.ORACLE_PUBLISHER_SECRET;
-  if (!secret) {
+  if (!secret && !DRY_RUN) {
     console.error("❌  ORACLE_PUBLISHER_SECRET is not set.");
     console.error("    Add ORACLE_PUBLISHER_SECRET=S... to your .env.local");
     process.exit(1);
   }
 
-  const publisherKp = Keypair.fromSecret(secret);
+  // Dry runs never sign, so a throwaway key is enough to build the banner.
+  const publisherKp = secret ? Keypair.fromSecret(secret) : Keypair.random();
   const publisherAddress = publisherKp.publicKey();
   const server = new sorobanRpc.Server(NETWORK.rpcUrl);
   const contract = new Contract(CONTRACTS.oracleAdapter);
@@ -192,6 +244,18 @@ async function run() {
   console.log(`  Contract  : ${CONTRACTS.oracleAdapter}`);
   console.log(`  Markets   : ${ORACLE_MARKETS.map((m) => `${m.symbol}:${m.priceSourceSymbol}`).join(", ")}`);
   console.log(`  Fetch     : ${FETCH_INTERVAL_MS / 1000}s; publish on ${PUBLISH_DEVIATION_BPS}bps move or ${PUBLISH_HEARTBEAT_SECS}s heartbeat (USDC: ${USDC_PUBLISH_DEVIATION_BPS}bps/${USDC_PUBLISH_HEARTBEAT_SECS}s)`);
+  console.log(
+    `  Reflector : ${
+      REFLECTOR_GUARD_ENABLED
+        ? `guard ON @ ${REFLECTOR_DIVERGENCE_HALT_BPS}bps, max age ${REFLECTOR_MAX_AGE_SECS}s — ${reflectorContractId()}`
+        : "guard OFF (REFLECTOR_GUARD_ENABLED=false)"
+    }`
+  );
+  const noReflector = ORACLE_MARKETS.filter((m) => !m.reflectorSymbol).map((m) => m.oracleSymbol);
+  if (REFLECTOR_GUARD_ENABLED && noReflector.length) {
+    console.log(`              no Reflector feed (CEX median only): ${noReflector.join(", ")}`);
+  }
+  if (DRY_RUN) console.log(`  Mode      : DRY RUN — one pass, nothing is signed or submitted\n`);
 
   // Last successfully published price/time per asset, for deviation+heartbeat
   // gating. Only updated on confirmed success so failures retry next fetch.
@@ -257,6 +321,47 @@ async function run() {
     return false; // ambiguous — retry next fetch; a duplicate publish is harmless
   }
 
+  /**
+   * Independent Reflector cross-check on the CEX median.
+   *
+   * Returns true when it is safe to publish. The guard only ever BLOCKS on a
+   * live Reflector price that genuinely disagrees; every "cannot tell" case
+   * (no feed, RPC failure, stale round) passes through, because halting the
+   * venue on our own inability to read a third party is a self-inflicted
+   * outage, not a safety measure.
+   */
+  async function reflectorAllowsPublish(
+    market: (typeof ORACLE_MARKETS)[number],
+    median: bigint
+  ): Promise<boolean> {
+    if (!REFLECTOR_GUARD_ENABLED) return true;
+    if (!market.reflectorSymbol) return true; // BNB, TRX — no Reflector feed
+
+    const ref = await reflectorLastPrice(market.reflectorSymbol);
+    if (!ref) {
+      console.warn(`\n  ⚠ ${market.oracleSymbol}: Reflector unreadable — cross-check skipped this tick`);
+      return true;
+    }
+
+    const refAge = Math.floor(Date.now() / 1000) - ref.timestamp;
+    if (refAge > REFLECTOR_MAX_AGE_SECS) {
+      console.warn(`\n  ⚠ ${market.oracleSymbol}: Reflector round is ${refAge}s old (> ${REFLECTOR_MAX_AGE_SECS}s) — cross-check skipped`);
+      return true;
+    }
+
+    const bps = divergenceBps(median, ref.price);
+    if (bps > REFLECTOR_DIVERGENCE_HALT_BPS) {
+      const fmt = (v: bigint) => (Number(v) / Number(PRICE_PRECISION)).toFixed(market.priceDecimals);
+      console.error(
+        `\n  ✗✗ ${market.oracleSymbol} ORACLE DIVERGENCE: CEX median $${fmt(median)} vs Reflector $${fmt(ref.price)} ` +
+        `= ${bps}bps > ${REFLECTOR_DIVERGENCE_HALT_BPS}bps — HALTING publication ` +
+        `(settlement will fail-stop on staleness)`
+      );
+      return false;
+    }
+    return true;
+  }
+
   async function publishMarket(market: (typeof ORACLE_MARKETS)[number]) {
     try {
       const agg = await aggregatePrice(market.oracleSymbol, [
@@ -265,9 +370,31 @@ async function run() {
         () => krakenPrice(market.baseAsset),
       ]);
       if (!agg) return; // fail-safe: skip tick, on-chain staleness guard takes over
+
+      // Cross-check BEFORE the deviation/heartbeat gate: a divergence must be
+      // reported every tick it persists, not only on the ticks we would have
+      // published anyway.
+      const allowed = await reflectorAllowsPublish(market, agg.price);
+
+      if (DRY_RUN) {
+        const ref = market.reflectorSymbol ? await reflectorLastPrice(market.reflectorSymbol) : null;
+        const fmt = (v: bigint) => (Number(v) / Number(PRICE_PRECISION)).toFixed(market.priceDecimals);
+        const refCol = !market.reflectorSymbol
+          ? "no Reflector feed — guard skipped"
+          : ref
+          ? `reflector $${fmt(ref.price)} div ${divergenceBps(agg.price, ref.price)}bps`
+          : "reflector unreadable — guard skipped";
+        console.log(
+          `  ${market.symbol.padEnd(9)} median $${fmt(agg.price).padStart(12)} (${agg.sources} src)  ` +
+          `${refCol.padEnd(42)} → ${allowed ? "PUBLISH" : "SKIP (halt)"}`
+        );
+        return;
+      }
+
+      if (!allowed) return;
       if (!shouldPublish(market.oracleSymbol, agg.price, PUBLISH_DEVIATION_BPS, PUBLISH_HEARTBEAT_SECS)) return;
       const priceHuman = Number(agg.price) / Number(PRICE_PRECISION);
-      process.stdout.write(`\r  Publishing ${market.oracleSymbol} $${priceHuman.toFixed(4)} (${agg.sources} sources) at ${new Date().toISOString().slice(11, 19)}...`);
+      process.stdout.write(`\r  Publishing ${market.oracleSymbol} $${priceHuman.toFixed(market.priceDecimals)} (${agg.sources} sources) at ${new Date().toISOString().slice(11, 19)}...`);
       if (await writePrice(market.oracleSymbol, agg.price, agg.confidence, agg.publishTime)) {
         lastPublished.set(market.oracleSymbol, { price: agg.price, ts: Date.now() });
       }
@@ -311,15 +438,25 @@ async function run() {
         return;
       }
 
+      if (DRY_RUN) {
+        console.log(`  ${"USDC".padEnd(9)} sourced $${(Number(price) / Number(PRICE_PRECISION)).toFixed(4)} (peg guard ${USDC_DEPEG_HALT_BPS}bps) → PUBLISH`);
+        return;
+      }
       if (!shouldPublish("USDC", price, USDC_PUBLISH_DEVIATION_BPS, USDC_PUBLISH_HEARTBEAT_SECS)) return;
       const priceHuman = Number(price) / Number(PRICE_PRECISION);
       process.stdout.write(`\r  Publishing USDC $${priceHuman.toFixed(4)} at ${new Date().toISOString().slice(11, 19)}...`);
-      if (await writePrice("USDC", price, confidence, BigInt(Math.floor(Date.now() / 1000)))) {
+      if (await writePrice("USDC", price, confidence, ledgerSafePublishTime())) {
         lastPublished.set("USDC", { price, ts: Date.now() });
       }
     } catch (e) {
       process.stdout.write(` ✗ ${(e as Error).message?.slice(0, 100)}\n`);
     }
+  }
+
+  if (DRY_RUN) {
+    await tickInner();
+    console.log(`\n  (dry run complete — no transactions were built or submitted)`);
+    return;
   }
 
   // ── Activity-aware idling ──────────────────────────────────────────────────
@@ -368,6 +505,11 @@ async function run() {
   async function tickInner() {
     for (const market of ORACLE_MARKETS) {
       await publishMarket(market);
+      // One account submits every market's write_price, and Soroban allows
+      // only one host-function invocation per transaction — these cannot be
+      // batched. Space them so consecutive submissions don't race the
+      // publisher's sequence number.
+      if (PUBLISH_STAGGER_MS > 0) await sleep(PUBLISH_STAGGER_MS);
     }
     await publishUsdc();
   }

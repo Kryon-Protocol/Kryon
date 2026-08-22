@@ -27,7 +27,7 @@ import {
   xdr,
   rpc as sorobanRpc,
 } from "@stellar/stellar-sdk";
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "../lib/sql";
 import { ACTIVE_MARKETS, CONTRACTS, NETWORK } from "../config";
 
 type Sql = NeonQueryFunction<false, false>;

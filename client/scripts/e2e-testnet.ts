@@ -15,7 +15,7 @@ import {
   nativeToScVal, Address, xdr, rpc as sorobanRpc,
   authorizeEntry, Horizon, Networks, Operation, Asset, BASE_FEE,
 } from "@stellar/stellar-sdk";
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { execSync } from "child_process";
 import { CONTRACTS, ASSETS, NETWORK } from "../config";
 import { orderSigningMessage } from "../lib/market/signing-message";

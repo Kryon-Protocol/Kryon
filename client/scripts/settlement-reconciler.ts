@@ -21,7 +21,7 @@
  *   or via package.json: npm run dev:reconciler
  */
 
-import { neon, neonConfig } from "@neondatabase/serverless";
+import { neon, neonConfig } from "../lib/sql";
 import {
   Keypair,
   TransactionBuilder,

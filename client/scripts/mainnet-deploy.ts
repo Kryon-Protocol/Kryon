@@ -502,7 +502,7 @@ async function main() {
   } else if (!process.env.DATABASE_URL) {
     console.log("  ⚠ DATABASE_URL not set — skipped. Run `npm run db:seed-markets` once it's configured.");
   } else {
-    const { neon } = await import("@neondatabase/serverless");
+    const { neon } = await import("../lib/sql");
     const { seedMarkets } = await import("./seed-markets");
     const sql = neon(process.env.DATABASE_URL);
     const results = await seedMarkets(sql as never);

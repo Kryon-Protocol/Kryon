@@ -26,7 +26,7 @@
  *   or: npm run db:seed-markets
  */
 
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "../lib/sql";
 import { ACTIVE_MARKETS } from "../config";
 
 type Sql = NeonQueryFunction<false, false>;

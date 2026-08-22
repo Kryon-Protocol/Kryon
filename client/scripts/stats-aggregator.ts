@@ -12,7 +12,7 @@
  *   DATABASE_URL=... npx tsx scripts/stats-aggregator.ts --loop   # every 30s
  */
 
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "../lib/sql";
 import { NETWORK } from "../config";
 
 type Sql = NeonQueryFunction<false, false>;

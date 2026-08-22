@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { readFileSync } from "fs";
 
 // Split SQL into individual statements, keeping $$-quoted bodies (DO blocks,

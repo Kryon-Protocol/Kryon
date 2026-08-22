@@ -39,7 +39,7 @@ import {
   Asset,
   BASE_FEE,
 } from "@stellar/stellar-sdk";
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { execSync } from "child_process";
 import { CONTRACTS, ASSETS, NETWORK, MARKETS } from "../config";
 import { orderSettlementMessage, pubkeyHexFromAddress } from "../lib/market/signing-message";

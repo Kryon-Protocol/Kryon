@@ -17,7 +17,7 @@
  *   or: npm run dev:matcher
  */
 
-import { neon, neonConfig, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, neonConfig, type NeonQueryFunction } from "../lib/sql";
 
 // Keep fetch connections alive — prevents "fetch failed" on Neon serverless
 // after idle periods by re-establishing the HTTP connection as needed.
@@ -492,10 +492,40 @@ async function cancelPoisonOrder(sql: Sql, o: RestingOrder): Promise<void> {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+/**
+ * One cheap indexed probe telling us which markets have ANY open order.
+ *
+ * tick() used to run two full order-loading queries per market per second
+ * unconditionally — 2 q/s with one market, but 16 q/s once eight markets went
+ * live, which is ~1.4M queries/day against a book that is usually empty. That
+ * load is also why the database's compute never idles.
+ *
+ * A market with no open orders has nothing to match, so this replaces the
+ * per-market loads with a single GROUP BY on ticks where the book is quiet.
+ */
+async function marketsWithOpenOrders(sql: Sql): Promise<Set<number>> {
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const ids = MATCHER_MARKETS.map((m) => m.id);
+  const rows = await sql`
+    SELECT "marketId"
+    FROM "Order"
+    WHERE "marketId" = ANY(${ids})
+      AND cancelled = false
+      AND "filledSize"::numeric < "size"::numeric
+      AND "expiryTs" > ${nowSec.toString()}::bigint
+    GROUP BY "marketId"
+  `;
+  return new Set(rows.map((r: Record<string, unknown>) => Number(r["marketId"])));
+}
+
 async function tick(sql: Sql) {
   let totalFills = 0;
 
+  const active = await marketsWithOpenOrders(sql);
+  if (active.size === 0) return;
+
   for (const market of MATCHER_MARKETS) {
+    if (!active.has(market.id)) continue;
     const [limitOrders, marketOrders] = await Promise.all([
       loadRestingOrders(sql, market.id),
       loadMarketOrders(sql, market.id),

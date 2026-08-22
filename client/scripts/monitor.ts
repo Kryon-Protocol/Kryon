@@ -9,6 +9,7 @@
  *   - DB latency (round-trip time)
  *   - App /api/health endpoint
  *   - WebSocket connectivity
+ *   - Operator wallet XLM balances (oracle, matcher, liquidator, TTL keeper)
  *
  * Alerting (optional): set ALERT_WEBHOOK_URL to receive alerts on failures.
  * The monitor POSTs JSON {"content": "..."} — works out of the box with a
@@ -24,7 +25,7 @@
  *   npm run dev:monitor
  */
 
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { checkProtocolActivity } from "../lib/oracle-activity";
 import { WebSocket } from "ws";
 import { Contract, TransactionBuilder, Keypair, Account, rpc as sorobanRpc, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
@@ -46,6 +47,12 @@ const DB_LATENCY_WARN_MS = 2_000;
 
 const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL;
 const ALERT_REMINDER_MS = 60 * 60 * 1000; // hourly reminder while a check stays broken
+
+// Keepers pay their own transaction fees. A wallet that quietly drains halts the
+// service it funds — the oracle stops publishing, TTL bumps stop, liquidations
+// stop — and the only symptom is silence, which is indistinguishable from an
+// idle protocol. Alert on the balance, not on the outage it eventually causes.
+const OPERATOR_XLM_WARN = Number(process.env.OPERATOR_XLM_WARN ?? "25");
 
 const PRICE_PRECISION = 1e18;
 
@@ -89,6 +96,7 @@ async function checkOracleFreshness(): Promise<string> {
   const server = new sorobanRpc.Server(NETWORK.rpcUrl);
   const markets = Object.values(ACTIVE_MARKETS);
   const results: string[] = [];
+  const problems: string[] = [];
 
   for (const market of markets) {
     const contract = new Contract(CONTRACTS.oracleAdapter);
@@ -120,14 +128,19 @@ async function checkOracleFreshness(): Promise<string> {
       .build();
 
     const sim = await server.simulateTransaction(tx);
-    if (sorobanRpc.Api.isSimulationError(sim)) throw new Error(`oracle sim failed: ${sim.error?.slice(0, 80)}`);
+    if (sorobanRpc.Api.isSimulationError(sim)) {
+      // A missing feed reads as a sim error; name the market so the alert is
+      // actionable, and keep checking the rest.
+      problems.push(`${market.oracleSymbol} sim failed: ${sim.error?.slice(0, 60)}`);
+      continue;
+    }
 
     const result = sim.result?.retval;
-    if (!result) throw new Error("oracle returned no value");
+    if (!result) { problems.push(`${market.oracleSymbol} returned no value`); continue; }
 
     const snap = scValToNative(result) as Record<string, unknown>;
     const publishTime = Number(snap["publish_time"] ?? 0);
-    if (!publishTime) throw new Error("oracle snapshot has no publish_time");
+    if (!publishTime) { problems.push(`${market.oracleSymbol} snapshot has no publish_time`); continue; }
 
     const ageS = Math.round((Date.now() / 1000) - publishTime);
     if (ageS > ORACLE_MAX_AGE_SECS) {
@@ -139,9 +152,20 @@ async function checkOracleFreshness(): Promise<string> {
         results.push(`${market.oracleSymbol}=idle (${ageS}s old, publishing suspended)`);
         continue;
       }
-      throw new Error(`oracle ${market.oracleSymbol} is ${ageS}s stale (max ${ORACLE_MAX_AGE_SECS}s) while ACTIVE: ${activity.reasons.join(",")}`);
+      // Collect rather than throw: with eight feeds, throwing on the first
+      // stale market hides the other seven, and "4 check(s) failed" tells an
+      // on-call engineer nothing about WHICH market is down.
+      problems.push(`${market.oracleSymbol} ${ageS}s stale (max ${ORACLE_MAX_AGE_SECS}s, active: ${activity.reasons.join(",")})`);
+      continue;
     }
     results.push(`${market.oracleSymbol}=${ageS}s old`);
+  }
+
+  if (problems.length) {
+    throw new Error(
+      `${problems.length}/${markets.length} feed(s) stale — ${problems.join("; ")}` +
+      (results.length ? ` | healthy: ${results.join(", ")}` : "")
+    );
   }
   return results.join(", ");
 }
@@ -201,6 +225,63 @@ async function checkWebSocket(): Promise<string> {
     });
     ws.on("error", (e) => { clearTimeout(timer); reject(e); });
   });
+}
+
+type Operator = { name: string; address: string };
+
+// Prefer an explicit pubkey when one is configured; otherwise derive it from the
+// secret the service already holds, so this check needs no new configuration.
+function operatorAddress(secretEnv: string, pubkeyEnv?: string): string | null {
+  const pub = pubkeyEnv ? process.env[pubkeyEnv] : undefined;
+  if (pub) return pub;
+  const secret = process.env[secretEnv];
+  if (!secret) return null;
+  try {
+    return Keypair.fromSecret(secret).publicKey();
+  } catch {
+    return null;
+  }
+}
+
+function operators(): Operator[] {
+  const candidates = [
+    { name: "oracle", address: operatorAddress("ORACLE_PUBLISHER_SECRET") },
+    { name: "matcher", address: operatorAddress("MATCHER_OPERATOR_SECRET", "MATCHER_OPERATOR_PUBKEY") },
+    { name: "liquidator", address: operatorAddress("LIQUIDATOR_SECRET") },
+    { name: "ttl-keeper", address: operatorAddress("TTL_KEEPER_SECRET") },
+  ];
+  return candidates.filter((o): o is Operator => o.address !== null);
+}
+
+async function checkOperatorBalances(): Promise<string> {
+  const ops = operators();
+  if (!ops.length) return "no operator keys configured";
+
+  const healthy: string[] = [];
+  const problems: string[] = [];
+
+  await Promise.all(
+    ops.map(async (op) => {
+      const res = await fetch(`${NETWORK.horizonUrl}/accounts/${op.address}`, { cache: "no-store" } as RequestInit);
+      // A merged or never-funded operator is a harder failure than a low one:
+      // the service will never recover on its own.
+      if (res.status === 404) {
+        problems.push(`${op.name} account does not exist (merged or unfunded)`);
+        return;
+      }
+      if (!res.ok) {
+        problems.push(`${op.name} horizon HTTP ${res.status}`);
+        return;
+      }
+      const body = (await res.json()) as { balances: { asset_type: string; balance: string }[] };
+      const xlm = Number(body.balances.find((b) => b.asset_type === "native")?.balance ?? "0");
+      if (xlm < OPERATOR_XLM_WARN) problems.push(`${op.name} has ${xlm.toFixed(2)} XLM (< ${OPERATOR_XLM_WARN})`);
+      else healthy.push(`${op.name}=${xlm.toFixed(1)}`);
+    })
+  );
+
+  if (problems.length) throw new Error(problems.join("; "));
+  return `${healthy.sort().join(", ")} XLM`;
 }
 
 // ── Alerting ──────────────────────────────────────────────────────────────────
@@ -265,6 +346,7 @@ async function runChecks() {
     timed("indexer-lag",      checkIndexerLag),
     timed("app-health",       checkAppHealth),
     timed("websocket",        checkWebSocket),
+    timed("operator-funds",   checkOperatorBalances),
   ]);
 
   let allOk = true;
@@ -275,7 +357,8 @@ async function runChecks() {
   }
 
   if (!allOk) {
-    console.error(`\x1b[31m  ⚠ ${results.filter(r => !r.ok).length} check(s) failed\x1b[0m`);
+    const failed = results.filter((r) => !r.ok);
+    console.error(`\x1b[31m  ⚠ ${failed.length} check(s) failed: ${failed.map((r) => `${r.name} (${r.detail})`).join(" | ")}\x1b[0m`);
   } else {
     console.log(`\x1b[32m  All checks passed\x1b[0m`);
   }
@@ -287,7 +370,16 @@ console.log(`✓ Kryon monitor starting`);
 console.log(`  App : ${APP_URL}`);
 console.log(`  WS  : ${WS_URL}`);
 console.log(`  Interval: ${CHECK_INTERVAL_MS / 1000}s`);
-console.log(`  Alerts: ${ALERT_WEBHOOK_URL ? "webhook configured" : "disabled (set ALERT_WEBHOOK_URL)"}`);
+if (ALERT_WEBHOOK_URL) {
+  console.log(`  Alerts: webhook configured`);
+} else {
+  // The 2026-07 outage ran 21 days undetected because this was unset and the
+  // monitor logged every failure to nowhere. Eight markets multiply the
+  // failure surface, so this warns loudly rather than mentioning it in passing.
+  console.error("\x1b[33m  ⚠  ALERT_WEBHOOK_URL is NOT SET — checks will run but NOBODY WILL BE NOTIFIED.\x1b[0m");
+  console.error("\x1b[33m     This is exactly how the 2026-07 outage went 21 days undetected.\x1b[0m");
+  console.error("\x1b[33m     Set ALERT_WEBHOOK_URL (Slack/Discord incoming webhook) before relying on this.\x1b[0m");
+}
 
 runChecks();
 setInterval(runChecks, CHECK_INTERVAL_MS);

@@ -17,7 +17,7 @@
  */
 
 import { WebSocketServer, WebSocket } from "ws";
-import { neon } from "@neondatabase/serverless";
+import { neon } from "../lib/sql";
 import { ACTIVE_MARKETS } from "../config";
 
 const PORT = parseInt(process.env.PORT ?? "8080", 10);
