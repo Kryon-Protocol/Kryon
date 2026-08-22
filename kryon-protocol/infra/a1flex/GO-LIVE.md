@@ -190,7 +190,7 @@ Then get the repo and secrets onto the box:
 
 ```bash
 ssh -i ~/.ssh/kryon-vm-oracle.key opc@<NEW_IP> \
-  'git clone --depth 1 https://github.com/SamyaDeb/KryonV2.git ~/kryon'
+  'git clone --depth 1 https://github.com/Kryon-Protocol/Kryon.git ~/kryon'
 
 # Operator secrets never live in git — copy the working env across.
 scp -i ~/.ssh/kryon-vm-oracle.key \
