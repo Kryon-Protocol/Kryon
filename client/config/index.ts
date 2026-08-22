@@ -1,68 +1,64 @@
-// Contract addresses and network config. Testnet is the local/dev default.
-// Mainnet deployments must set NEXT_PUBLIC_STELLAR_NETWORK=mainnet plus every
-// NEXT_PUBLIC_* contract/asset address below; otherwise the app fails fast.
+// Market definitions, precision constants, and the *active* network's
+// addresses.
+//
+// The per-network address tables live in `./networks.ts`. This module picks one
+// of them and re-exports it under the flat names the app has always used
+// (`NETWORK`, `CONTRACTS`, `ASSETS`), so the ~20 existing consumers did not
+// have to change.
+//
+// ── How the active network is chosen ─────────────────────────────────────────
+// In the browser this is evaluated once per page load, from `?network=` or the
+// `kryon_network` cookie (see lib/network-resolve.ts). Switching networks in the
+// navbar performs a full reload, which re-evaluates this module — that is what
+// makes a static const safe here, and it is deliberate: a full reload is the
+// only way to guarantee no mainnet state survives into a testnet view. The
+// memoised RPC client, the WebSocket connection, in-flight polls, and every
+// component's cached balances/positions are all process-local singletons; an
+// in-place swap would have to invalidate each one, and missing a single one
+// means showing mainnet balances against testnet contracts.
+//
+// On the SERVER these consts resolve to the deployment's primary network and
+// are therefore NOT per-request. Server code that must honour the caller's
+// choice (API routes) resolves it explicitly with `getNetworkConfig(...)` and
+// the helpers in `lib/network-server.ts`.
+//
+// Keeper scripts under `scripts/` run one network per process and get their
+// network from `NEXT_PUBLIC_STELLAR_NETWORK` in their env file, exactly as
+// before.
 
-const STELLAR_NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet";
-const IS_MAINNET = STELLAR_NETWORK === "mainnet";
+import {
+  getNetworkConfig,
+  PRIMARY_NETWORK,
+  type NetworkConfig,
+  type NetworkId,
+} from "./networks";
+import { resolveClientNetwork } from "@/lib/network-resolve";
 
-// Every NEXT_PUBLIC_* access below MUST be written as a literal
-// `process.env.NEXT_PUBLIC_X` expression, not a parameterized/dynamic lookup
-// (e.g. `process.env[key]`). Next.js's client-bundle inlining only replaces
-// statically-analyzable literal expressions with their build-time value — a
-// dynamic key defeats that, silently leaving `undefined` in the browser and
-// falling through to the fallback regardless of what's actually configured.
-// (Discovered 2026-07-08: the compiled client chunk still contained the
-// testnet vault address after every Vercel-side env var was independently
-// confirmed correct — the previous `envOrDefault(key, fallback)` helper used
-// `process.env[key]`, which is exactly this anti-pattern.)
-function assertPresentOnMainnet(key: string, value: string | undefined): void {
-  if (IS_MAINNET && !value) throw new Error(`Missing ${key} for mainnet deployment`);
-}
+export {
+  NETWORKS,
+  NETWORK_IDS,
+  PRIMARY_NETWORK,
+  getNetworkConfig,
+  isNetworkId,
+} from "./networks";
+export type { NetworkId, NetworkConfig, ContractSet, AssetSet } from "./networks";
 
-assertPresentOnMainnet("NEXT_PUBLIC_STELLAR_RPC_URL", process.env.NEXT_PUBLIC_STELLAR_RPC_URL);
-assertPresentOnMainnet("NEXT_PUBLIC_STELLAR_PASSPHRASE", process.env.NEXT_PUBLIC_STELLAR_PASSPHRASE);
-assertPresentOnMainnet("NEXT_PUBLIC_STELLAR_HORIZON_URL", process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_GOVERNANCE", process.env.NEXT_PUBLIC_CONTRACT_GOVERNANCE);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_ORACLE_ADAPTER", process.env.NEXT_PUBLIC_CONTRACT_ORACLE_ADAPTER);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_VAULT", process.env.NEXT_PUBLIC_CONTRACT_VAULT);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_ENGINE", process.env.NEXT_PUBLIC_CONTRACT_ENGINE);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_ORDER_GATEWAY", process.env.NEXT_PUBLIC_CONTRACT_ORDER_GATEWAY);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_INSURANCE", process.env.NEXT_PUBLIC_CONTRACT_INSURANCE);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_LIQUIDATION", process.env.NEXT_PUBLIC_CONTRACT_LIQUIDATION);
-assertPresentOnMainnet("NEXT_PUBLIC_CONTRACT_RISK", process.env.NEXT_PUBLIC_CONTRACT_RISK);
-assertPresentOnMainnet("NEXT_PUBLIC_ASSET_NATIVE_XLM", process.env.NEXT_PUBLIC_ASSET_NATIVE_XLM);
-assertPresentOnMainnet("NEXT_PUBLIC_ASSET_USDC", process.env.NEXT_PUBLIC_ASSET_USDC);
-assertPresentOnMainnet("NEXT_PUBLIC_USDC_ISSUER", process.env.NEXT_PUBLIC_USDC_ISSUER);
+/** The network this module's flat exports are bound to. See the note above. */
+export const ACTIVE_NETWORK_ID: NetworkId =
+  typeof window === "undefined" ? PRIMARY_NETWORK : resolveClientNetwork();
+
+const ACTIVE: NetworkConfig = getNetworkConfig(ACTIVE_NETWORK_ID);
 
 export const NETWORK = {
-  name: STELLAR_NETWORK,
-  rpcUrl:
-    process.env.NEXT_PUBLIC_STELLAR_RPC_URL ??
-    (IS_MAINNET ? "https://mainnet.sorobanrpc.com" : "https://soroban-testnet.stellar.org"),
-  passphrase:
-    process.env.NEXT_PUBLIC_STELLAR_PASSPHRASE ??
-    (IS_MAINNET ? "Public Global Stellar Network ; September 2015" : "Test SDF Network ; September 2015"),
-  horizonUrl:
-    process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL ??
-    (IS_MAINNET ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org"),
+  name: ACTIVE.id,
+  rpcUrl: ACTIVE.rpcUrl,
+  passphrase: ACTIVE.passphrase,
+  horizonUrl: ACTIVE.horizonUrl,
 } as const;
 
-export const CONTRACTS = {
-  governance: process.env.NEXT_PUBLIC_CONTRACT_GOVERNANCE ?? "CBZT5HUXI42TD55GGB5Y7OZZ72IT5SN64ONOGDYS2PFQCOWIT4XOA6MU",
-  oracleAdapter: process.env.NEXT_PUBLIC_CONTRACT_ORACLE_ADAPTER ?? "CARSV4BT3II5QONUAOP4D363OUNTTSSZCXSKNNXKZCBJM7Z6UXSNZ3LP",
-  vault: process.env.NEXT_PUBLIC_CONTRACT_VAULT ?? "CBQ6634Z3UPXFVVHHV2JNSGXHQOZZK62Z65HCAQTINBGXS3IDXKRTRYK",
-  engine: process.env.NEXT_PUBLIC_CONTRACT_ENGINE ?? "CBSUYAO2EYAQVFISJQKG4TNMJPCDCPPFGI25Q3SW2BJPFSKQ45GRGTXN",
-  orderGateway: process.env.NEXT_PUBLIC_CONTRACT_ORDER_GATEWAY ?? "CAJGC2SIV6DFJETJ6ATG5MR6RPNX5HQ26LYA4RGSHF2QPTBS6OJWONL3",
-  insurance: process.env.NEXT_PUBLIC_CONTRACT_INSURANCE ?? "CA3VD55APWCYLVN7PYGJ7NPKSQBE3VU4MWVCSKLOYAZI5RFWWR76G2CL",
-  liquidation: process.env.NEXT_PUBLIC_CONTRACT_LIQUIDATION ?? "CDCRNKXTTTOO7IRVC66KZR5QMVGGZIOF2QPJSVELLD7G7F4IVLM2DCMG",
-  risk: process.env.NEXT_PUBLIC_CONTRACT_RISK ?? "CAVCW7XCQRA6VYWBKFDABYZGDNUJYHEYKHR4TT6BQBHS6QPDGFJVYBDS",
-} as const;
+export const CONTRACTS = ACTIVE.contracts;
 
-export const ASSETS = {
-  nativeXlm: process.env.NEXT_PUBLIC_ASSET_NATIVE_XLM ?? "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
-  usdc: process.env.NEXT_PUBLIC_ASSET_USDC ?? "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
-  usdcIssuer: process.env.NEXT_PUBLIC_USDC_ISSUER ?? "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
-} as const;
+export const ASSETS = ACTIVE.assets;
 
 export const MARKETS: Record<string, MarketConfig> = {
   "XLM-PERP": {
@@ -73,12 +69,18 @@ export const MARKETS: Record<string, MarketConfig> = {
     quoteAsset: "USDC",
     oracleSymbol: "XLM",
     priceSourceSymbol: "XLMUSDT",
+    reflectorSymbol: "XLM",
     settlementAsset: ASSETS.usdc,
     tvSymbol: "COINBASE:XLMUSD",
-    maxLeverageBps: 100000, // 10x — 1/initialMarginBps; matches on-chain engine max_leverage_bps
+    maxLeverageBps: 100000, // 10x — 1e8/initialMarginBps; matches on-chain engine max_leverage_bps
     initialMarginBps: 1000,  // 10%
     maintenanceMarginBps: 500, // 5%
     liquidationFeeBps: 50,
+    priceDecimals: 4,
+    sizeDecimals: 4,
+    tickSizes: [0.0001, 0.001, 0.01, 0.1],
+    maxOpenInterestBase: 1_450_000,   // ≈ $300k @ $0.2038 (ref 2026-08-22)
+    maxOpenInterestUsd: 300_000,
   },
   "BTC-PERP": {
     marketId: 2,
@@ -88,12 +90,18 @@ export const MARKETS: Record<string, MarketConfig> = {
     quoteAsset: "USDC",
     oracleSymbol: "BTC",
     priceSourceSymbol: "BTCUSDT",
+    reflectorSymbol: "BTC",
     settlementAsset: ASSETS.usdc,
     tvSymbol: "COINBASE:BTCUSD",
-    maxLeverageBps: 500000, // 50x — 1/initialMarginBps
+    maxLeverageBps: 500000, // 50x
     initialMarginBps: 200,   // 2%
     maintenanceMarginBps: 100, // 1%
     liquidationFeeBps: 25,
+    priceDecimals: 1,
+    sizeDecimals: 4,
+    tickSizes: [0.1, 1, 10, 100],
+    maxOpenInterestBase: 25,          // ≈ $1.9M @ $77,334 (ref 2026-08-22)
+    maxOpenInterestUsd: 2_000_000,
   },
   "ETH-PERP": {
     marketId: 3,
@@ -103,17 +111,139 @@ export const MARKETS: Record<string, MarketConfig> = {
     quoteAsset: "USDC",
     oracleSymbol: "ETH",
     priceSourceSymbol: "ETHUSDT",
+    reflectorSymbol: "ETH",
     settlementAsset: ASSETS.usdc,
     tvSymbol: "COINBASE:ETHUSD",
-    maxLeverageBps: 200000, // 20x — 1/initialMarginBps
+    maxLeverageBps: 200000, // 20x
     initialMarginBps: 500,   // 5%
     maintenanceMarginBps: 250, // 2.5%
     liquidationFeeBps: 35,
+    priceDecimals: 2,
+    sizeDecimals: 3,
+    tickSizes: [0.01, 0.1, 1, 10],
+    maxOpenInterestBase: 400,         // ≈ $1M @ $2,441 (ref 2026-08-22)
+    maxOpenInterestUsd: 1_000_000,
+  },
+  "SOL-PERP": {
+    marketId: 4,
+    symbol: "SOL-PERP",
+    displayName: "SOL-PERP",
+    baseAsset: "SOL",
+    quoteAsset: "USDC",
+    oracleSymbol: "SOL",
+    priceSourceSymbol: "SOLUSDT",
+    reflectorSymbol: "SOL",
+    settlementAsset: ASSETS.usdc,
+    tvSymbol: "COINBASE:SOLUSD",
+    maxLeverageBps: 100000, // 10x
+    initialMarginBps: 1000,  // 10%
+    maintenanceMarginBps: 500, // 5%
+    liquidationFeeBps: 50,
+    priceDecimals: 2,
+    sizeDecimals: 3,
+    tickSizes: [0.01, 0.1, 1, 5],
+    maxOpenInterestBase: 5_000,       // ≈ $500k @ $94.14 (ref 2026-08-22)
+    maxOpenInterestUsd: 500_000,
+  },
+  "XRP-PERP": {
+    marketId: 5,
+    symbol: "XRP-PERP",
+    displayName: "XRP-PERP",
+    baseAsset: "XRP",
+    quoteAsset: "USDC",
+    oracleSymbol: "XRP",
+    priceSourceSymbol: "XRPUSDT",
+    reflectorSymbol: "XRP",
+    settlementAsset: ASSETS.usdc,
+    tvSymbol: "COINBASE:XRPUSD",
+    maxLeverageBps: 100000, // 10x
+    initialMarginBps: 1000,  // 10%
+    maintenanceMarginBps: 500, // 5%
+    liquidationFeeBps: 50,
+    priceDecimals: 4,
+    sizeDecimals: 1,
+    tickSizes: [0.0001, 0.001, 0.01, 0.1],
+    maxOpenInterestBase: 325_000,     // ≈ $500k @ $1.522 (ref 2026-08-22)
+    maxOpenInterestUsd: 500_000,
+  },
+  "ADA-PERP": {
+    marketId: 6,
+    symbol: "ADA-PERP",
+    displayName: "ADA-PERP",
+    baseAsset: "ADA",
+    quoteAsset: "USDC",
+    oracleSymbol: "ADA",
+    priceSourceSymbol: "ADAUSDT",
+    reflectorSymbol: "ADA",
+    settlementAsset: ASSETS.usdc,
+    tvSymbol: "COINBASE:ADAUSD",
+    maxLeverageBps: 50000,  // 5x
+    initialMarginBps: 2000,  // 20%
+    maintenanceMarginBps: 1000, // 10%
+    liquidationFeeBps: 50,
+    priceDecimals: 4,
+    sizeDecimals: 1,
+    tickSizes: [0.0001, 0.001, 0.01, 0.1],
+    maxOpenInterestBase: 850_000,     // ≈ $200k @ $0.2320 (ref 2026-08-22)
+    maxOpenInterestUsd: 200_000,
+  },
+  // NOTE: BNB and TRX have NO Reflector feed (absent from the External CEX &
+  // DEX oracle's asset list on both networks), so `reflectorSymbol` is omitted
+  // and the divergence guard in oracle-keeper.ts is skipped for them. They run
+  // on the 3-source CEX median alone — a weaker posture, reflected in their
+  // conservative leverage and OI caps.
+  "BNB-PERP": {
+    marketId: 7,
+    symbol: "BNB-PERP",
+    displayName: "BNB-PERP",
+    baseAsset: "BNB",
+    quoteAsset: "USDC",
+    oracleSymbol: "BNB",
+    priceSourceSymbol: "BNBUSDT",
+    settlementAsset: ASSETS.usdc,
+    // Coinbase does not list BNB; BINANCE:BNBUSDT is the pair the oracle uses.
+    tvSymbol: "BINANCE:BNBUSDT",
+    maxLeverageBps: 100000, // 10x
+    initialMarginBps: 1000,  // 10%
+    maintenanceMarginBps: 500, // 5%
+    liquidationFeeBps: 50,
+    priceDecimals: 2,
+    sizeDecimals: 3,
+    tickSizes: [0.01, 0.1, 1, 5],
+    maxOpenInterestBase: 425,         // ≈ $300k @ $695.18 (ref 2026-08-22)
+    maxOpenInterestUsd: 300_000,
+  },
+  "TRX-PERP": {
+    marketId: 8,
+    symbol: "TRX-PERP",
+    displayName: "TRX-PERP",
+    baseAsset: "TRX",
+    quoteAsset: "USDC",
+    oracleSymbol: "TRX",
+    priceSourceSymbol: "TRXUSDT",
+    settlementAsset: ASSETS.usdc,
+    // Coinbase has no TRX pair on TradingView (COINBASE:TRXUSD 404s and the
+    // chart renders "This symbol doesn't exist"). Binance is the venue we
+    // already price TRX against.
+    tvSymbol: "BINANCE:TRXUSDT",
+    maxLeverageBps: 50000,  // 5x
+    initialMarginBps: 2000,  // 20%
+    maintenanceMarginBps: 1000, // 10%
+    liquidationFeeBps: 50,
+    priceDecimals: 5,
+    sizeDecimals: 0,
+    tickSizes: [0.00001, 0.0001, 0.001, 0.01],
+    maxOpenInterestBase: 575_000,     // ≈ $200k @ $0.3456 (ref 2026-08-22)
+    maxOpenInterestUsd: 200_000,
   },
 };
 
+// The intended production set. A missing NEXT_PUBLIC_ACTIVE_MARKETS must not
+// silently collapse the venue to a single market (it did until 2026-08-22).
+export const DEFAULT_ACTIVE_MARKETS = Object.keys(MARKETS).join(",");
+
 function parseActiveMarketSymbols(raw: string | undefined): string[] {
-  const symbols = (raw ?? "XLM-PERP")
+  const symbols = (raw ?? DEFAULT_ACTIVE_MARKETS)
     .split(",")
     .map((symbol) => symbol.trim().toUpperCase())
     .filter(Boolean);
@@ -150,6 +280,28 @@ export interface MarketConfig {
   initialMarginBps: number;
   maintenanceMarginBps: number;
   liquidationFeeBps: number;
+
+  /** Price display precision. 1 for BTC ($76,996.5), 5 for TRX ($0.24187). */
+  priceDecimals: number;
+  /** Base-unit (size) display precision. */
+  sizeDecimals: number;
+  /** Order-book aggregation ladder, finest first. Drives OrderBook's TICKS. */
+  tickSizes: number[];
+  /**
+   * Reflector "External CEX & DEX" asset symbol, used ONLY as an independent
+   * divergence cross-check (never as the mark price — its 300s resolution is
+   * far outside the 120s on-chain staleness guard). Omitted when Reflector has
+   * no feed for the asset, which disables the guard for that market.
+   */
+  reflectorSymbol?: string;
+  /**
+   * On-chain `max_open_interest`, in whole base-asset units (registered as
+   * PRECISION * units). A fixed unit cap sized to `maxOpenInterestUsd` at the
+   * reference price noted per market — revisit if spot moves materially.
+   */
+  maxOpenInterestBase: number;
+  /** The USD notional intent behind `maxOpenInterestBase`. Sizing/reference only. */
+  maxOpenInterestUsd: number;
 }
 
 // Precision: oracle prices and PnL values use 1e18 scale; USDC amounts use 1e7 (Stellar stroop-equivalent)
@@ -157,16 +309,45 @@ export const PRICE_PRECISION = BigInt("1000000000000000000"); // 1e18
 export const AMOUNT_PRECISION = BigInt("10000000"); // 1e7 (Stellar 7 decimal places)
 export const BPS_PRECISION = 10000;
 
+// ─── Off-chain service endpoints ─────────────────────────────────────────────
+// The matcher and indexer are reached through this app's own /api routes, so
+// they need no per-network URL — the route resolves the caller's network and
+// picks the matching database.
+//
+// The WebSocket server is a separate process per network (one ws-server can
+// only tail one database), so it DOES need a per-network address. The testnet
+// var is optional: unset simply means the UI falls back to REST polling for
+// testnet, which is the same graceful degradation mainnet already had.
+
 export const MATCHER_URL =
   process.env.NEXT_PUBLIC_MATCHER_URL ?? "";
 
 export const INDEXER_URL =
   process.env.NEXT_PUBLIC_INDEXER_URL ?? "";
 
-export const WS_URL =
-  process.env.NEXT_PUBLIC_WS_URL ?? "";
+// The legacy single-network `NEXT_PUBLIC_WS_URL` belongs to whichever network
+// the deployment was built for — inheriting it into the other one would point
+// the testnet UI at the mainnet feed (or vice versa).
+const LEGACY_WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "";
 
-export const STELLAR_EXPERT_URL =
-  IS_MAINNET ? "https://stellar.expert/explorer/public" : "https://stellar.expert/explorer/testnet";
+const WS_URL_BY_NETWORK: Record<NetworkId, string> = {
+  mainnet:
+    process.env.NEXT_PUBLIC_WS_URL_MAINNET ??
+    (PRIMARY_NETWORK === "mainnet" ? LEGACY_WS_URL : ""),
+  testnet:
+    process.env.NEXT_PUBLIC_WS_URL_TESTNET ??
+    (PRIMARY_NETWORK === "testnet" ? LEGACY_WS_URL : ""),
+};
 
-export const NETWORK_LABEL = IS_MAINNET ? "Stellar Mainnet" : "Stellar Testnet";
+export function getWsUrl(network: NetworkId): string {
+  return WS_URL_BY_NETWORK[network] ?? "";
+}
+
+export const WS_URL = getWsUrl(ACTIVE_NETWORK_ID);
+
+/** Whether the selected venue has keepers behind it (drives the degraded banner). */
+export const KEEPERS_EXPECTED = ACTIVE.keepersExpected;
+
+export const STELLAR_EXPERT_URL = ACTIVE.explorerUrl;
+
+export const NETWORK_LABEL = ACTIVE.label;
