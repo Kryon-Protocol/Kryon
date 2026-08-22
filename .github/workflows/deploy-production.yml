@@ -1,9 +1,20 @@
 name: deploy-production
 
-# Deploys the trading client to Vercel after a push to main, but ONLY after
-# the readiness gate (lint, typecheck, build) passes.
+# Deploys the trading client to the services VM after a push to main, but ONLY
+# after the readiness gate (lint, typecheck, build) passes.
 #
-# Required environment secrets: VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID.
+# WHY NOT VERCEL ANY MORE
+# -----------------------
+# Postgres lives on the services VM and listens on loopback only. A serverless
+# web tier cannot reach it — no route to the box, and no static egress IP to
+# allowlist even if 5432 were opened. Vercel and Cloudflare Workers both served
+# `503 readiness_unavailable` on every database route for exactly that reason.
+# The app now runs on the VM itself behind a Cloudflare Tunnel, so the database
+# is a loopback call again. See kryon-protocol/infra/a1flex/WEB-TIER.md.
+#
+# Required environment secrets: VM_SSH_KEY (private key), VM_HOST, VM_USER.
+# The deploy job is skipped cleanly when they are absent, so this workflow is
+# safe to merge before the VM cutover is finished.
 on:
   push:
     branches: [main]
@@ -55,63 +66,76 @@ jobs:
         run: npm run build
 
   # ---------------------------------------------------------------------------
-  # Deploy: Vercel prebuilt flow for production.
+  # Deploy: build and restart on the services VM, over SSH.
   # ---------------------------------------------------------------------------
   deploy:
-    name: vercel production deploy
+    name: vm production deploy
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment:
       name: production
       url: ${{ vars.NEXT_PUBLIC_APP_URL }}
-    defaults:
-      run:
-        working-directory: client
     env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-      VERCEL_CLI_VERSION: ${{ vars.VERCEL_CLI_VERSION || 'latest' }}
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_USER: ${{ secrets.VM_USER }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Setup
-        uses: ./.github/actions/setup-client
-
-      - name: Validate deploy secrets
+      - name: Check deploy secrets
+        id: check
         run: |
-          test -n "$VERCEL_ORG_ID"     || { echo "::error::VERCEL_ORG_ID missing";     exit 1; }
-          test -n "$VERCEL_PROJECT_ID" || { echo "::error::VERCEL_PROJECT_ID missing"; exit 1; }
-          test -n "$VERCEL_TOKEN"      || { echo "::error::VERCEL_TOKEN missing";       exit 1; }
+          if [ -z "${{ secrets.VM_SSH_KEY }}" ] || [ -z "$VM_HOST" ] || [ -z "$VM_USER" ]; then
+            echo "::notice::VM_SSH_KEY / VM_HOST / VM_USER not set — skipping deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      # public/docs is gitignored (generated from ../docs), so CI must build the
-      # Docusaurus site here or the deployed app 404s on every /docs route.
-      - name: Build docs site into public/docs
+      - name: Configure SSH
+        if: steps.check.outputs.ready == 'true'
         run: |
-          npm --prefix ../docs ci --no-audit --fund=false
-          npm run docs:build
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/deploy.key
+          chmod 600 ~/.ssh/deploy.key
+          # Pin the host key instead of accepting blindly: this key can restart
+          # the process that serves real positions, so a MITM here is not a
+          # theoretical concern.
+          if [ -n "${{ secrets.VM_HOST_KEY }}" ]; then
+            printf '%s\n' "${{ secrets.VM_HOST_KEY }}" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VM_HOST_KEY not set — falling back to TOFU for this connection."
+            ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
 
-      - name: Pull Vercel environment
+      # The VM builds its own bundle. NEXT_PUBLIC_* values are inlined into the
+      # client bundle by static textual substitution at build time, so a bundle
+      # built in CI would carry the runner's env — which is how a compiled chunk
+      # once shipped testnet contract addresses to a mainnet deployment.
+      - name: Deploy
+        if: steps.check.outputs.ready == 'true'
         run: |
-          n=0; until [ $n -ge 3 ]; do
-            npx --yes vercel@"$VERCEL_CLI_VERSION" pull --yes --environment=production --token="$VERCEL_TOKEN" && break
-            n=$((n+1)); echo "pull attempt $n failed; retrying in $((n*10))s"; sleep $((n*10))
-          done; [ $n -lt 3 ]
+          ssh -i ~/.ssh/deploy.key -o BatchMode=yes "$VM_USER@$VM_HOST" \
+            'set -euo pipefail
+             cd ~/kryon
+             git fetch --all --prune
+             git reset --hard origin/main
+             bash kryon-protocol/infra/a1flex/setup-web-tier.sh'
 
-      - name: Build Vercel output
-        run: npx --yes vercel@"$VERCEL_CLI_VERSION" build --prod --token="$VERCEL_TOKEN"
-
-      - name: Deploy prebuilt output
+      - name: Verify the deployed site
+        if: steps.check.outputs.ready == 'true'
         run: |
-          n=0; until [ $n -ge 3 ]; do
-            url=$(npx --yes vercel@"$VERCEL_CLI_VERSION" deploy --prebuilt --prod --token="$VERCEL_TOKEN") && {
-              echo "Deployed: $url"
-              { echo "### ✅ Production deploy (Vercel)"; echo "$url"; } >> "$GITHUB_STEP_SUMMARY"
-              break
-            }
-            n=$((n+1)); echo "deploy attempt $n failed; retrying in $((n*15))s"; sleep $((n*15))
-          done; [ $n -lt 3 ]
+          url="${{ vars.NEXT_PUBLIC_APP_URL }}"
+          [ -n "$url" ] || { echo "::error::NEXT_PUBLIC_APP_URL var not set"; exit 1; }
+          # Both networks: the toggle serves both venues from this one
+          # deployment, and an unconfigured second database only fails on the
+          # routes that ask for it — which a mainnet-only check would miss.
+          for net in mainnet testnet; do
+            body=$(curl -fsS -m 20 "$url/api/ready?network=$net") || {
+              echo "::error::$net readiness request failed"; exit 1; }
+            echo "$net → $body"
+            case "$body" in
+              *'"ok":true'*) ;;
+              *) echo "::error::$net not ready after deploy"; exit 1 ;;
+            esac
+          done
+          { echo "### ✅ Production deploy (VM)"; echo "$url"; } >> "$GITHUB_STEP_SUMMARY"
