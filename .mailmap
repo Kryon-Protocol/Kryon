@@ -1,0 +1,12 @@
+# Canonical identities for contributors.
+# Collapses duplicate name/email spellings so `git shortlog -sne` and
+# GitHub attribution show one entry per person.
+
+Samya Deb <sammodeb28@gmail.com>
+Samya Deb <sammodeb28@gmail.com> Samya <sammodeb28@gmail.com>
+Samya Deb <sammodeb28@gmail.com> SamyaDeb <sammodeb28@gmail.com>
+
+Debanjan Mondal <debanjanmondalk2005@gmail.com>
+Debanjan Mondal <debanjanmondalk2005@gmail.com> Debanjannn <debanjanmondalk2005@gmail.com>
+
+Anindha Biswas <funnypost00@gmail.com>
