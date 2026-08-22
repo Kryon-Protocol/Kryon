@@ -289,6 +289,16 @@ NEXT_PUBLIC_STELLAR_NETWORK=mainnet
 NEXT_PUBLIC_APP_URL=https://kryonprotocol.live   # an empty string crashes next build
 
 ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/...   # from Phase 0
+
+# REQUIRED, not optional. lib/rate-limit.ts fails CLOSED under
+# NODE_ENV=production: with no Upstash credentials it denies every request to
+# /api/orders, /cancel, /settlements, /fills, /funding and /portfolio. Because
+# /api/ready does not rate-limit, the site comes up green and then rejects
+# every order. Reuse the existing free-tier database
+# (https://concise-impala-100570.upstash.io) — but rotate the token first, it
+# was pasted into a chat transcript.
+UPSTASH_REDIS_REST_URL=https://concise-impala-100570.upstash.io
+UPSTASH_REDIS_REST_TOKEN=...
 ```
 
 > **Do not wrap values in double quotes.** A quoted `DATABASE_URL` once broke

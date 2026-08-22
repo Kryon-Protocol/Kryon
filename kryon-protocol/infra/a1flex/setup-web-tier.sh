@@ -45,6 +45,20 @@ for var in DATABASE_URL_MAINNET DATABASE_URL_TESTNET; do
   fi
 done
 
+# rateLimit() FAILS CLOSED in production: with no Upstash credentials it denies
+# every request to /api/orders, /cancel, /settlements, /fills, /funding and
+# /portfolio. /api/ready does not rate-limit, so the site would come up green
+# and then reject every order — a confusing way to fail Phase 9.
+for var in UPSTASH_REDIS_REST_URL UPSTASH_REDIS_REST_TOKEN; do
+  grep -qE "^${var}=." "$ENV_FILE" \
+    || die "${var} is not set in ${ENV_FILE}.
+      lib/rate-limit.ts denies every state-mutating request when Upstash is
+      unconfigured under NODE_ENV=production — orders, cancels, settlements,
+      fills, funding and portfolio all return denied while /api/ready still
+      reports ok. Set both before deploying."
+done
+ok "Upstash rate-limit credentials present"
+
 for var in NEXT_PUBLIC_MAINNET_KEEPERS_LIVE NEXT_PUBLIC_TESTNET_KEEPERS_LIVE; do
   grep -qE "^${var}=." "$ENV_FILE" \
     || warn "${var} unset — the degraded-venue banner falls back to \"only the primary network is live\", which mislabels the other venue in whichever direction is wrong."
