@@ -82,7 +82,7 @@ model ProtocolEvent {
 
 model Market {
   id                     Int      @id
-  symbol                 String
+  symbol                 String   @unique
   settlementAsset        String
   active                 Boolean  @default(false)
   lastPrice              String   @default("0")
@@ -98,6 +98,7 @@ model Market {
 
   positions              Position[]
   fills                  Fill[]
+  orders                 Order[]
   oracleSnapshots        OracleSnapshot[]
   fundingUpdates         FundingUpdate[]
   keeperActions          KeeperAction[]
@@ -135,7 +136,11 @@ model Order {
   updatedAt   DateTime @updatedAt
 
   account     Account  @relation(fields: [owner], references: [address])
+  // RESTRICT, not CASCADE: de-listing a market must never delete the order
+  // history that settled against it.
+  market      Market   @relation(fields: [marketId], references: [id], onDelete: Restrict)
 
+  // Global per account, NOT per market — see lib/market/order-intent.ts.
   @@unique([owner, nonce])
   @@index([marketId, isLong, limitPrice])
   @@index([expiryTs])
