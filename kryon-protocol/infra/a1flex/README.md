@@ -37,6 +37,26 @@ So 4/24 running 24/7 fits inside Always Free with roughly 3% headroom, and is
 the largest shape that does. **Do not exceed 4 OCPU or 24 GB** — going over
 converts the whole instance to paid, billed hourly.
 
+> **⚠️ The monthly pool is not your service limit.** Verified on this tenancy
+> 2026-08-22: A1 limits in `ap-mumbai-1` are **2 OCPU / 12 GB**, 0 in use — so a
+> 4/24 launch fails `LimitExceeded` (`standard-a1-core-count`,
+> `standard-a1-memory-count`) even though the Always Free *pool* would cover it.
+> Check before planning around a shape:
+>
+> ```bash
+> oci limits resource-availability get --compartment-id <tenancy> \
+>   --service-name compute --limit-name standard-a1-core-count \
+>   --availability-domain <AD>
+> ```
+>
+> Raise it from **Governance → Limits, Quotas and Usage → Request increase**
+> (free, not instant). 2/12 is ample regardless: ~1.7 GB for 14 Node processes,
+> 3 GB Postgres shared buffers, ~7 GB spare. `bootstrap.sh` scales its tuning to
+> whatever RAM it finds, so a smaller shape needs no config change.
+>
+> Repeated failed launches also trip a **429 `TooManyRequests`** cooldown on the
+> user — back off a minute or two between attempts rather than retrying tightly.
+
 Two caveats that are not obvious:
 
 - **Capacity.** Free-tier Ampere is frequently unavailable ("Out of host

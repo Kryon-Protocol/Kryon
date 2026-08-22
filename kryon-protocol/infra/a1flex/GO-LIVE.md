@@ -132,10 +132,15 @@ Copy it off before that instance is terminated in Phase 11.
 ## Phase 2 — Create the A1.Flex box ⏱ 15 min, or days if capacity is short
 
 The 945 MB micro box **cannot** host the web tier — it is already at ~85% memory
-with Postgres and 7 keepers, and `next build` alone will OOM it. A1.Flex 4 OCPU
-/ 24 GB is the largest shape that stays inside Always Free (4×730=2,920 OCPU-h
-of 3,000; 24×730=17,520 GB-h of 18,000). **Do not exceed 4/24** — going over
-converts the whole instance to paid.
+with Postgres and 7 keepers, and `next build` alone will OOM it.
+
+4 OCPU / 24 GB is the largest shape inside the Always Free *pool*, but your
+tenancy's **service limit** is a separate cap: `ap-mumbai-1` is set to
+**2 OCPU / 12 GB** (verified 2026-08-22, 0 in use), so a 4/24 launch fails with
+`LimitExceeded`. 2/12 is ample here — ~1.7 GB for 14 Node processes, 3 GB of
+Postgres shared buffers, ~7 GB spare — and `bootstrap.sh` scales its tuning to
+whatever RAM it finds. Request a limit increase later from **Governance →
+Limits, Quotas and Usage** if you want the headroom.
 
 🧑 Authenticate (opens a browser):
 
@@ -148,7 +153,7 @@ converts the whole instance to paid.
 ```bash
 cd ~/Downloads/Kryon/kryon-protocol/infra/a1flex
 DRY_RUN=1 bash provision.sh     # discovery only — check the plan
-bash provision.sh               # creates it, prints the public IP
+OCPUS=2 MEMORY_GB=12 bash provision.sh   # sized to the service limit
 ```
 
 It discovers your compartment, VCN, subnet and current Oracle Linux 9 Ampere

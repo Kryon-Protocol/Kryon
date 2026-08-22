@@ -71,7 +71,12 @@ ok "compartment $COMPARTMENT"
 # Ampere capacity differs per AD; we try each in turn rather than failing on
 # the first "Out of host capacity".
 log "Availability domains"
-mapfile -t ADS < <("$OCI" "${AUTH[@]}" iam availability-domain list \
+# Read with a while-loop rather than `mapfile`: that is a bash 4 builtin and
+# macOS still ships bash 3.2, where this script is most often run from.
+ADS=()
+while IFS= read -r ad; do
+  [[ -n "$ad" ]] && ADS+=("$ad")
+done < <("$OCI" "${AUTH[@]}" iam availability-domain list \
   --compartment-id "$COMPARTMENT" --query 'data[].name' --raw-output \
   | tr -d '[]", ' | grep -v '^$')
 (( ${#ADS[@]} )) || die "no availability domains returned"
@@ -126,12 +131,25 @@ else
   fi
 fi
 
-# ── Security list: open the ws-server ports ──────────────────────────────────
-# This is the layer that was missed in July — firewalld was open on the host
-# but the VCN never allowed 8080 in, so the ws-server was unreachable and the
-# UI silently fell back to REST polling.
-log "Security list ingress (8080 mainnet ws, 8081 testnet ws)"
-if [[ "${DRY_RUN:-0}" == "1" || "$SUBNET" == "<new>" ]]; then
+# ── Security list: the ws-server ports ───────────────────────────────────────
+# SKIPPED BY DEFAULT, and that is the correct posture now.
+#
+# This layer was the one missed in July: firewalld was open on the host but the
+# VCN never allowed 8080 in, so the ws-server was unreachable and the UI fell
+# back to REST polling. The fix then would have been to open it.
+#
+# The web tier now runs on this box behind a Cloudflare Tunnel, and cloudflared
+# reaches the ws-server over localhost. Opening 8080/8081 to 0.0.0.0/0 would
+# publish the feed a second time, in the clear as ws:// rather than wss://,
+# outside the tunnel's TLS and with no way to revoke it short of editing the
+# security list again. Nothing needs it.
+#
+# Set WS_INGRESS=1 only if you deliberately want a direct, unencrypted feed —
+# for a load test against the box, say — and remove the rules afterwards.
+log "Security list ingress (8080/8081 ws)"
+if [[ "${WS_INGRESS:-0}" != "1" ]]; then
+  ok "skipped — cloudflared reaches the ws-server over localhost (WS_INGRESS=1 to override)"
+elif [[ "${DRY_RUN:-0}" == "1" || "$SUBNET" == "<new>" ]]; then
   ok "(dry run) would add TCP 8080 + 8081 ingress from 0.0.0.0/0"
 else
   SL=$("$OCI" "${AUTH[@]}" network vcn get --vcn-id "$VCN_ID" \
