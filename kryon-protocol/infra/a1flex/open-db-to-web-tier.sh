@@ -35,9 +35,16 @@ sudo -u postgres sed -i "s|^[#[:space:]]*listen_addresses.*|listen_addresses = '
 sudo grep -q "^listen_addresses" "${PGDATA}/postgresql.conf" \
   || echo "listen_addresses = 'localhost,${DB_PRIVATE_IP}'" | sudo -u postgres tee -a "${PGDATA}/postgresql.conf" >/dev/null
 
-# Belt and braces: however the edit took, the file must end up postgres-owned.
+# Belt and braces: however the edit took, the file must end up postgres-owned
+# AND correctly labelled. The label is the part that bit us: sed -i creates a
+# new inode, the new inode gets a label the postgresql_t domain cannot read,
+# and Postgres refuses to start with
+#   could not open configuration file "postgresql.conf": Permission denied
+# while `ls -l` shows postgres:postgres and the contents are perfectly valid.
+# restorecon puts the policy's own label back.
 sudo chown postgres:postgres "${PGDATA}/postgresql.conf"
 sudo chmod 600 "${PGDATA}/postgresql.conf"
+sudo restorecon -F "${PGDATA}/postgresql.conf" 2>/dev/null || true
 ok "$(sudo grep '^listen_addresses' "${PGDATA}/postgresql.conf")"
 
 # A single host, not the subnet range: only the web tier needs in, and a /32
@@ -46,6 +53,7 @@ if ! sudo grep -q "${WEB_PRIVATE_IP}/32" "${PGDATA}/pg_hba.conf"; then
   echo "host    all             kryon           ${WEB_PRIVATE_IP}/32          scram-sha-256" \
     | sudo -u postgres tee -a "${PGDATA}/pg_hba.conf" >/dev/null
   sudo chown postgres:postgres "${PGDATA}/pg_hba.conf"
+  sudo restorecon -F "${PGDATA}/pg_hba.conf" 2>/dev/null || true
   ok "pg_hba: kryon@${WEB_PRIVATE_IP}/32 scram-sha-256"
 else
   ok "pg_hba: ${WEB_PRIVATE_IP}/32 already present"

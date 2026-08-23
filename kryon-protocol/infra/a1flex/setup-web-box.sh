@@ -14,7 +14,8 @@
 #     heavily CPU-bound.
 #  3. Oracle Linux 9 reserves 448MB of a 1GB box for crashkernel. Reclaim it or
 #     you are running a 498MB machine.
-#  4. SELinux denies init_t the execmem that Node's JIT needs, and a dontaudit
+#  4. SELinux denies init_t BOTH the execmem that Node's JIT needs AND
+#     name_connect to postgresql_port_t, and a dontaudit
 #     rule hides the denial. V8 asserts the failed mmap was ENOMEM, gets
 #     EACCES, and aborts with "Check failed: 12 == (*__errno_location ())" —
 #     an error that never mentions permissions. Diagnosed by `setenforce 0`
@@ -77,8 +78,23 @@ if ! sudo semodule -l 2>/dev/null | grep -q '^kryon-node'; then
   cd /tmp
   cat > kryon-node.te <<'TE'
 module kryon-node 1.0;
-require { type init_t; class process execmem; }
+
+require {
+    type init_t;
+    type postgresql_port_t;
+    class process execmem;
+    class tcp_socket name_connect;
+}
+
+# JIT: V8 maps writable-executable memory. Denied for init_t and hidden by a
+# dontaudit rule; V8 asserts the failed mmap was ENOMEM, gets EACCES, and
+# aborts with "Check failed: 12 == (*__errno_location ())".
 allow init_t self:process execmem;
+
+# Database: the web tier connects to Postgres on another host across the VCN.
+# Without this, connect() fails EACCES and every database route returns
+# readiness_unavailable while the service looks healthy and serves / with 200.
+allow init_t postgresql_port_t:tcp_socket name_connect;
 TE
   checkmodule -M -m -o kryon-node.mod kryon-node.te >/dev/null
   semodule_package -o kryon-node.pp -m kryon-node.mod
