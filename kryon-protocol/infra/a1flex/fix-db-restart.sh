@@ -1,37 +1,50 @@
 #!/usr/bin/env bash
 #
-# fix-db-restart.sh — restore postgresql.conf ownership and start Postgres.
+# fix-db-restart.sh — recover Postgres after `sed -i` relabelled its config.
 # RUN ON THE DATABASE BOX.
 #
-# Root cause: `sudo sed -i` does not edit in place. It writes a temp file and
-# renames it over the target, so the result is a NEW inode owned by root:root.
-# Postgres runs as `postgres` and then cannot read its own config:
-#   LOG: could not open configuration file "postgresql.conf": Permission denied
-#   FATAL: configuration file contains errors
-# The file contents were correct the whole time.
-set -euo pipefail
+# Ownership was already postgres:postgres and `sudo -u postgres postgres -C ...`
+# parsed the file fine — yet systemd still could not start the server. That gap
+# is the tell: systemd runs postgres in the confined SELinux domain
+# postgresql_t, while `sudo -u postgres` runs unconfined. `sed -i` writes a new
+# file, and the new inode gets a fresh SELinux label that may not match what
+# postgresql_t is allowed to read.
+set -uo pipefail
 PGDATA=/var/lib/pgsql/data
-ok() { printf '\033[0;32m  ✓ %s\033[0m\n' "$*"; }
+ok()   { printf '\033[0;32m  ✓ %s\033[0m\n' "$*"; }
+info() { printf '\033[1;36m== %s\033[0m\n' "$*"; }
 
-echo "=== ownership before ==="
-sudo ls -l "${PGDATA}/postgresql.conf" "${PGDATA}/pg_hba.conf"
+info "SELinux mode"
+getenforce 2>/dev/null || echo "  (selinux tools absent)"
 
-sudo chown postgres:postgres "${PGDATA}/postgresql.conf" "${PGDATA}/pg_hba.conf"
-sudo chmod 600 "${PGDATA}/postgresql.conf" "${PGDATA}/pg_hba.conf"
-ok "ownership restored to postgres:postgres, mode 600"
+info "Context on the config vs a file that was never edited"
+ls -Z "${PGDATA}/postgresql.conf" "${PGDATA}/pg_hba.conf" "${PGDATA}/PG_VERSION" 2>/dev/null
 
-# Validate BEFORE starting, so a bad config is a message rather than an outage.
-sudo -u postgres /usr/bin/postgres -C listen_addresses -D "$PGDATA" >/dev/null 2>&1 \
-  && ok "config parses cleanly" \
-  || { echo "  config still unreadable — stopping"; exit 1; }
+info "Recent SELinux denials mentioning postgres"
+sudo ausearch -m AVC -ts recent 2>/dev/null | grep -i postgres | tail -10 \
+  || sudo journalctl -t setroubleshoot -n 10 --no-pager 2>/dev/null \
+  || echo "  (no audit tooling / no denials found)"
 
+info "Relabelling to the policy default"
+sudo restorecon -Fv "${PGDATA}/postgresql.conf" "${PGDATA}/pg_hba.conf" 2>&1 | sed 's/^/  /' \
+  || echo "  restorecon unavailable"
+ls -Z "${PGDATA}/postgresql.conf" 2>/dev/null | sed 's/^/  now: /'
+
+info "Restarting"
 sudo systemctl restart postgresql
 sleep 3
-sudo systemctl is-active postgresql | sed 's/^/  status: /'
+STATE=$(sudo systemctl is-active postgresql)
+echo "  status: ${STATE}"
 
-echo "=== listening sockets ==="
-sudo ss -ltn | grep 5432 || echo "  NOT LISTENING"
+if [[ "$STATE" != "active" ]]; then
+  info "Still failing — last 12 log lines"
+  sudo journalctl -xeu postgresql.service --no-pager -n 12 2>/dev/null | grep -vE "^░|^--" | tail -8
+  exit 1
+fi
 
-echo "=== data intact? ==="
+ok "postgres running"
+info "Listening sockets"
+sudo ss -ltn | grep 5432 | sed 's/^/  /'
+info "Data intact"
 sudo -u postgres psql -tAc 'SELECT count(*) FROM "Market"' kryon_mainnet 2>/dev/null | sed 's/^/  mainnet Market rows: /'
 sudo -u postgres psql -tAc 'SELECT count(*) FROM "Fill"'   kryon_mainnet 2>/dev/null | sed 's/^/  mainnet Fill rows:   /'
