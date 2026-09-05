@@ -408,8 +408,21 @@ async function main() {
     mark(key);
   }
 
-  // ── Step 6: oracle XLM feed ─────────────────────────────────────────────────
-  console.log("\nStep 6 — Oracle XLM feed");
+  // ── Step 6: oracle feeds — XLM (base asset) AND USDC (collateral) ──────────
+  //
+  // USDC is not optional here. It is the settlement/collateral asset, and every
+  // settlement prices collateral through it:
+  //   gateway.settle_fill_signed → engine.open_position
+  //     → sync_and_require_initial_margin → vault.account_health
+  //       → oracle.get_price("USDC")
+  // `get_price` returns InvalidConfig (#5) for an unregistered asset, so a
+  // deployment with no USDC feed cannot settle a single trade on ANY market —
+  // the matcher writes each fill, settlement simulation fails, and
+  // `rollbackFill` deletes it again. This step previously registered XLM only,
+  // which is exactly how the v2 testnet deployment ended up unable to trade
+  // while looking healthy. See scripts/setup-usdc-feed.ts to remediate an
+  // environment already deployed without it.
+  console.log("\nStep 6 — Oracle feeds (XLM + USDC)");
   if (!done("oracle_feed")) {
     const guard = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({ key: sym("max_age_secs"),       val: u64(120n) }),
@@ -422,6 +435,21 @@ async function main() {
       guard,
       boolv(true),
     ], "oracle.set_feed(XLM)");
+
+    // Wider staleness window than a traded asset: the keeper deliberately halts
+    // USDC publication on a depeg so settlement fails closed, and 600s keeps
+    // that fail-stop meaningful while leaving room above its ≤90s heartbeat.
+    const usdcGuard = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({ key: sym("max_age_secs"),       val: u64(600n) }),
+      new xdr.ScMapEntry({ key: sym("max_confidence_bps"), val: u32(500) }),
+    ]);
+    await call(server, kp, ORCL, "set_feed", [
+      sym("USDC"),
+      addr(OPS["oracle-publisher"].pub),
+      xdr.ScVal.scvVec([sym("RedStone")]),
+      usdcGuard,
+      boolv(true),
+    ], "oracle.set_feed(USDC)");
     mark("oracle_feed");
   } else console.log("  ✓ already done");
 

@@ -271,7 +271,15 @@ export function OrderBook({ market }: { market: MarketConfig }) {
                   style={{ padding: "4px 8px" }}
                   onClick={() => setSelectedPrice(marketId, parseFloat(t.price))}
                 >
-                  <span className={t.side === "buy" ? "text-[#54bd7c]" : "text-[#e06a6a]"}>
+                  <span
+                    className={
+                      t.side === "buy"
+                        ? "text-[#54bd7c]"
+                        : t.side === "sell"
+                          ? "text-[#e06a6a]"
+                          : "text-[#a3a3a3]"
+                    }
+                  >
                     {parseFloat(t.price).toFixed(market.priceDecimals)}
                   </span>
                   <span className="text-right text-[#f5f5f5]">

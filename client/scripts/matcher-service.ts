@@ -30,6 +30,42 @@ import { orderSettlementMessage, pubkeyHexFromAddress } from "../lib/market/sign
 assertRequiredSecrets(["DATABASE_URL"]);
 assertNoPublicSecretLeak();
 
+/**
+ * The settlement fee-payer / operator key for THIS network.
+ *
+ * Accepts the network-suffixed name as well as the legacy unsuffixed one, the
+ * same precedence `lib/network-server.ts#matcherOperatorSecret` uses for the
+ * API. The two had drifted: the API learned `MATCHER_OPERATOR_SECRET_TESTNET`
+ * when the deployment went multi-network, this script never did, and it never
+ * falls back to the other network's key — that would sign a settlement with an
+ * account that cannot pay on the target chain.
+ *
+ * Missing it is FATAL rather than tolerated. Without a key `executeSettlement`
+ * returns false for every match, and the caller's `if (!settled) rollbackFill`
+ * then deletes each fill it just wrote. The service goes on logging "fill"
+ * lines while leaving no fills behind, the book stays visibly crossed because
+ * nothing ever clears, and every downstream volume/trader figure reads zero —
+ * a silent, total outage that looks like a healthy process. Crash instead.
+ */
+const OPERATOR_SECRET = (() => {
+  const suffixed =
+    NETWORK.name === "mainnet"
+      ? process.env.MATCHER_OPERATOR_SECRET_MAINNET
+      : process.env.MATCHER_OPERATOR_SECRET_TESTNET;
+  const secret = suffixed || process.env.MATCHER_OPERATOR_SECRET;
+  if (!secret) {
+    const suffixedName = `MATCHER_OPERATOR_SECRET_${NETWORK.name.toUpperCase()}`;
+    console.error(
+      `❌  No settlement operator key for network "${NETWORK.name}". ` +
+        `Set ${suffixedName} or MATCHER_OPERATOR_SECRET.\n` +
+        `    Without it every match is written and then immediately rolled back, ` +
+        `so the venue silently records no trades at all.`
+    );
+    process.exit(1);
+  }
+  return secret;
+})();
+
 type Sql = NeonQueryFunction<false, false>;
 const NETWORK_NAME = NETWORK.name;
 const PRICE_PRECISION = 1e18;
@@ -299,10 +335,24 @@ async function persistFill(sql: Sql, match: MatchResult): Promise<boolean> {
 // orders return to the book and get re-matched on a later tick. Keeps the DB
 // orderbook/trade feed consistent with on-chain truth.
 async function rollbackFill(sql: Sql, match: MatchResult): Promise<void> {
-  const { maker, taker, fillSize } = match;
+  const { maker, taker, fillSize, fillPrice } = match;
   const txHash = pseudoTxHash(maker, taker, fillSize);
   try {
     await sql`DELETE FROM "Fill" WHERE network = ${NETWORK_NAME} AND "txHash" = ${txHash}`;
+
+    // Give back the volume `persistFill` added. This was missing, so the
+    // counter only ever went up: a rolled-back fill left its notional behind
+    // permanently, and a venue that rolled back every match still accumulated
+    // "volume" indefinitely. That is why Market.volume reads ~$384M on mainnet
+    // against ~$455 of real fills, and ~$19.6M on a testnet with none at all.
+    // GREATEST(0, …) because an already-corrupted counter must not go negative.
+    const fillValue = (fillSize * fillPrice) / BigInt(Math.round(PRICE_PRECISION));
+    await sql`
+      UPDATE "Market"
+      SET volume = GREATEST(0, volume::numeric - ${fillValue.toString()}::numeric)::text,
+          "updatedAt" = NOW()
+      WHERE id = ${maker.marketId}
+    `;
     await sql`
       UPDATE "Order"
       SET "filledSize" = GREATEST(0, ("filledSize"::numeric - ${fillSize.toString()}::numeric))::text,
@@ -326,11 +376,50 @@ async function rollbackFill(sql: Sql, match: MatchResult): Promise<void> {
 // entries. The matcher simulates the tx, stores auth entries in TxJob, and the
 // connected clients sign via /api/settlements/[id]/sign.
 
+/**
+ * Leave a durable trace when a settlement attempt fails.
+ *
+ * Every failure path used to just `return false`, whereupon the caller rolled
+ * the fill back and deleted it. Nothing was written anywhere, so from outside
+ * the process a venue that settled perfectly and one that had been discarding
+ * every trade for days looked *identical*: no fills, no jobs, no errors — just
+ * an empty database and a book that never cleared. Diagnosing it required
+ * reading container logs, which is exactly what nobody has during an incident.
+ *
+ * A FAILED TxJob makes it queryable instead: it feeds `settlementsFailed` on
+ * the activity dashboard and carries `lastError` for whoever investigates. The
+ * unique key is (network, kind, payloadHash), so a match that keeps failing
+ * updates one row rather than accumulating thousands, and a later success
+ * flips that same row to CONFIRMED.
+ */
+async function recordSettlementFailure(sql: Sql, fillHash: string, reason: string): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO "TxJob" (
+        network, kind, "payloadHash", status, "lastError", attempts,
+        "nextAttemptAt", "createdAt", "updatedAt"
+      ) VALUES (
+        ${NETWORK_NAME}, 'settle_fill', ${fillHash}, 'FAILED', ${reason}, 1,
+        NOW(), NOW(), NOW()
+      )
+      ON CONFLICT (network, kind, "payloadHash") DO UPDATE SET
+        status      = 'FAILED',
+        "lastError" = EXCLUDED."lastError",
+        attempts    = "TxJob".attempts + 1,
+        "updatedAt" = NOW()
+    `;
+  } catch (e) {
+    // Never let bookkeeping mask the original failure.
+    process.stderr.write(`  ✗ could not record settlement failure: ${(e as Error).message?.slice(0, 80)}\n`);
+  }
+}
+
 async function executeSettlement(sql: Sql, match: MatchResult): Promise<boolean> {
   // Key separation: settlement uses ONLY the dedicated operator key. No
   // fallback to the oracle key — one key must never serve two roles.
-  const feePayerSecret = process.env.MATCHER_OPERATOR_SECRET;
-  if (!feePayerSecret) return false;
+  // Presence is guaranteed at startup (see OPERATOR_SECRET), so there is no
+  // longer a "no key" branch here quietly returning false and binning the fill.
+  const feePayerSecret = OPERATOR_SECRET;
 
   const fillHash = pseudoTxHash(match.maker, match.taker, match.fillSize);
 
@@ -374,6 +463,11 @@ async function executeSettlement(sql: Sql, match: MatchResult): Promise<boolean>
       `;
       return true;
     }
+    await recordSettlementFailure(
+      sql,
+      fillHash,
+      "submitSettleFillSigned returned no tx hash (signed fast path)"
+    );
     return false;
   }
 
@@ -407,6 +501,7 @@ async function executeSettlement(sql: Sql, match: MatchResult): Promise<boolean>
 
   if (!pending) {
     process.stderr.write(`  ✗ settlement simulation failed\n`);
+    await recordSettlementFailure(sql, fillHash, "simulateSettleFill returned null (auth-entry path)");
     return false;
   }
 
@@ -581,7 +676,13 @@ async function tick(sql: Sql) {
             await rollbackFill(sql, match);
           }
         } catch (e: unknown) {
-          process.stderr.write(`  ✗ executeSettlement: ${(e as Error).message?.slice(0, 80)}\n`);
+          const msg = (e as Error).message ?? String(e);
+          process.stderr.write(`  ✗ executeSettlement: ${msg.slice(0, 80)}\n`);
+          await recordSettlementFailure(
+            sql,
+            pseudoTxHash(match.maker, match.taker, match.fillSize),
+            `executeSettlement threw: ${msg.slice(0, 400)}`
+          );
           await rollbackFill(sql, match);
         }
       }

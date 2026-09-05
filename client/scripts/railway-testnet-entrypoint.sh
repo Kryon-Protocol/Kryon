@@ -23,6 +23,11 @@ KEYS=(
   NEXT_PUBLIC_CONTRACT_LIQUIDATION NEXT_PUBLIC_CONTRACT_RISK
   NEXT_PUBLIC_ASSET_NATIVE_XLM NEXT_PUBLIC_ASSET_USDC NEXT_PUBLIC_USDC_ISSUER
   ORACLE_PUBLISHER_SECRET MATCHER_OPERATOR_SECRET LIQUIDATOR_SECRET
+  # The network-suffixed spellings the multi-network code also accepts. A key
+  # set only under a suffixed name used to be dropped here silently, which for
+  # the matcher meant starting with no settlement key at all — every match
+  # rolled straight back and the venue recorded no trades.
+  ORACLE_PUBLISHER_SECRET_TESTNET MATCHER_OPERATOR_SECRET_TESTNET LIQUIDATOR_SECRET_TESTNET
   PUBLISH_TIME_BACKDATE_SECS PUBLISH_STAGGER_MS ALERT_WEBHOOK_URL
   SETTLEMENT_JOB_MAX_AGE_MINUTES
 )
@@ -33,5 +38,14 @@ for k in "${KEYS[@]}"; do
   [[ -n "$v" ]] && printf '%s=%s\n' "$k" "$v" >> .env.testnet
 done
 chmod 600 .env.testnet
+
+# Fail fast and loudly if the fleet has no settlement key for this network.
+# pm2 would otherwise start all seven processes "successfully" and the matcher
+# would quietly discard every fill it matched.
+if [[ -z "${MATCHER_OPERATOR_SECRET_TESTNET:-}${MATCHER_OPERATOR_SECRET:-}" ]]; then
+  echo "FATAL: neither MATCHER_OPERATOR_SECRET_TESTNET nor MATCHER_OPERATOR_SECRET is set;" >&2
+  echo "       the matcher cannot settle and would roll back every trade." >&2
+  exit 1
+fi
 
 exec npx --yes pm2-runtime ecosystem.testnet.config.cjs

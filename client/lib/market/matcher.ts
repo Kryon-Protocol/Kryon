@@ -96,6 +96,12 @@ export interface OrderBook {
 export interface RecentTrade {
   price: string;
   size: string;
-  side: "buy" | "sell";
+  /**
+   * The taker's direction. `null` when the taker's order row is no longer
+   * available to join against — the tape then shows the print in a neutral
+   * colour instead of guessing, which is what the old `makerNonce % 2` fallback
+   * effectively did for every trade.
+   */
+  side: "buy" | "sell" | null;
   timestamp: number;
 }

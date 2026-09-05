@@ -27,24 +27,31 @@ export async function GET(
 
   try {
     const sql = db(networkFromRequest(req));
+    // Side is the TAKER's direction — the aggressor is what makes a print a buy
+    // or a sell — joined from the taker's own order row. `Order` is unique on
+    // (owner, nonce), so this is exact. It replaces `makerNonce % 2`, which was
+    // a coin flip on a nonce and mislabelled roughly half of every print.
     const rows = await sql`
       SELECT
-        "fillPrice"::text  AS fill_price,
-        "fillSize"::text   AS fill_size,
-        "createdAt"        AS ts,
-        "makerNonce"::text AS maker_nonce
-      FROM "Fill"
-      WHERE "marketId" = ${marketId}
-      ORDER BY "createdAt" DESC, id DESC
+        f."fillPrice"::text AS fill_price,
+        f."fillSize"::text  AS fill_size,
+        f."createdAt"       AS ts,
+        ot."isLong"         AS taker_is_long
+      FROM "Fill" f
+      LEFT JOIN "Order" ot ON ot.owner = f.taker AND ot.nonce = f."takerNonce"
+      WHERE f."marketId" = ${marketId}
+      ORDER BY f."createdAt" DESC, f.id DESC
       LIMIT ${limit}
     `;
 
     const trades = rows.map((r) => ({
       price: (Number(r.fill_price) / PRICE_SCALE).toFixed(4),
       size:  normaliseSize(r.fill_size).toFixed(4),
-      // Alternate sides when the taker direction isn't stored (E2E data).
-      // Real indexer data should include side; for now use nonce parity.
-      side:  (Number(r.maker_nonce) % 2 === 0 ? "buy" : "sell") as "buy" | "sell",
+      // null when the taker's order row has been pruned — callers render no
+      // side rather than an invented one.
+      side:  r.taker_is_long === null || r.taker_is_long === undefined
+        ? null
+        : ((r.taker_is_long ? "buy" : "sell") as "buy" | "sell"),
       timestamp: new Date(r.ts).getTime(),
     }));
 

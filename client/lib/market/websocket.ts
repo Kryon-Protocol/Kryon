@@ -13,7 +13,7 @@ import { WS_URL } from "@/config";
 
 type WsMessage =
   | { type: "orderbook"; market_id: number; bids: { price: string; size: string }[]; asks: { price: string; size: string }[]; timestamp: number }
-  | { type: "trade"; market_id: number; price: string; size: string; side: "buy" | "sell"; timestamp: number }
+  | { type: "trade"; market_id: number; price: string; size: string; side: "buy" | "sell" | null; timestamp: number }
   | { type: "subscribed"; channels: string[] }
   | { type: "pong" }
   | { type: "error"; message: string };

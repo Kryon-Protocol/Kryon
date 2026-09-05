@@ -48,7 +48,7 @@ interface OrderBookSnapshot {
 interface Trade {
   price: string;
   size: string;
-  side: "buy" | "sell";
+  side: "buy" | "sell" | null;
   timestamp: number;
 }
 
@@ -94,6 +94,7 @@ async function fetchOrderBook(marketId: number): Promise<OrderBookSnapshot> {
       AND cancelled = false
       AND "limitPrice" <> '0'
       AND "filledSize"::numeric < "size"::numeric
+      AND ("expiryTs"::numeric = 0 OR "expiryTs"::numeric > EXTRACT(EPOCH FROM NOW()))
     ORDER BY "limitPrice"::numeric ASC
   `;
   const bidMap = new Map<string, number>();
@@ -116,12 +117,16 @@ async function fetchOrderBook(marketId: number): Promise<OrderBookSnapshot> {
 
 async function fetchRecentTrades(marketId: number, limit = 50): Promise<Trade[]> {
   const sql = db();
+  // Side is the taker's direction, joined from the taker's own order — the same
+  // rule as /api/markets/:id/trades, so the streamed tape and the REST tape can
+  // never disagree about which way a print went.
   const rows = await sql`
-    SELECT "fillPrice"::text AS fill_price, "fillSize"::text AS fill_size,
-           "createdAt" AS ts, "makerNonce"::text AS maker_nonce
-    FROM "Fill"
-    WHERE "marketId" = ${marketId}
-    ORDER BY "createdAt" DESC, id DESC
+    SELECT f."fillPrice"::text AS fill_price, f."fillSize"::text AS fill_size,
+           f."createdAt" AS ts, ot."isLong" AS taker_is_long
+    FROM "Fill" f
+    LEFT JOIN "Order" ot ON ot.owner = f.taker AND ot.nonce = f."takerNonce"
+    WHERE f."marketId" = ${marketId}
+    ORDER BY f."createdAt" DESC, f.id DESC
     LIMIT ${limit}
   `;
   return rows.map((r) => {
@@ -130,7 +135,10 @@ async function fetchRecentTrades(marketId: number, limit = 50): Promise<Trade[]>
     return {
       price: (Number(r.fill_price) / PRICE_SCALE).toFixed(4),
       size: size.toFixed(4),
-      side: (Number(r.maker_nonce) % 2 === 0 ? "buy" : "sell") as "buy" | "sell",
+      side:
+        r.taker_is_long === null || r.taker_is_long === undefined
+          ? null
+          : ((r.taker_is_long ? "buy" : "sell") as "buy" | "sell"),
       timestamp: new Date(r.ts).getTime(),
     };
   });

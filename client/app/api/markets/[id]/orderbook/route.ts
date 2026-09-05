@@ -16,7 +16,15 @@ export async function GET(
     const PRECISION = 1e18;
     const AMOUNT_PRECISION = 1e7;
 
-    // Open resting limit orders: not cancelled, not fully filled, has a limit price
+    // Open resting limit orders: not cancelled, not fully filled, not expired,
+    // and carrying a limit price.
+    //
+    // The expiry predicate must match the matcher's (scripts/matcher-service.ts
+    // `loadRestingOrders`) exactly. Without it this route published orders the
+    // matcher will never touch, which is why the public book showed a
+    // permanently CROSSED spread — a best bid above the best ask that no engine
+    // was ever going to trade, because both sides had already expired. Any
+    // divergence here reappears as a book that looks broken.
     const rows = await sql`
       SELECT
         "isLong",
@@ -29,6 +37,7 @@ export async function GET(
         AND cancelled = false
         AND "limitPrice" <> '0'
         AND "filledSize"::numeric < "size"::numeric
+        AND ("expiryTs"::numeric = 0 OR "expiryTs"::numeric > EXTRACT(EPOCH FROM NOW()))
       ORDER BY "limitPrice"::numeric ASC
     `;
 
