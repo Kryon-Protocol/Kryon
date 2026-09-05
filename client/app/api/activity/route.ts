@@ -109,6 +109,15 @@ export async function GET(req: NextRequest) {
       updatedAt: new Date(r.updated_at as string).getTime(),
     }));
 
+    // Sort markets by real volume (descending) so active markets appear at the top
+    marketStats.sort((a, b) => {
+      const volA = BigInt(a.volume);
+      const volB = BigInt(b.volume);
+      if (volA > volB) return -1;
+      if (volA < volB) return 1;
+      return a.marketId - b.marketId;
+    });
+
     const recentSettlements = (settlementRows as Record<string, unknown>[]).map((r) => ({
       id: String(r.id),
       txHash: String(r.submitted_hash),
