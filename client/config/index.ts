@@ -258,7 +258,25 @@ function parseActiveMarketSymbols(raw: string | undefined): string[] {
   return unique;
 }
 
-export const ACTIVE_MARKET_SYMBOLS = parseActiveMarketSymbols(process.env.NEXT_PUBLIC_ACTIVE_MARKETS);
+// `NEXT_PUBLIC_ACTIVE_MARKETS` is legacy and, like the OVERRIDES in
+// networks.ts, only applies to the deployment's PRIMARY network — it was never
+// network-scoped, so pinning it (e.g. to a single market during a phased
+// mainnet rollout) silently capped BOTH sides of the navbar toggle at once.
+// The secondary network now defaults to every known market instead, and can
+// be pinned independently with `NEXT_PUBLIC_ACTIVE_MARKETS_MAINNET` /
+// `NEXT_PUBLIC_ACTIVE_MARKETS_TESTNET`.
+const ACTIVE_MARKETS_ENV_BY_NETWORK: Record<NetworkId, string | undefined> = {
+  mainnet:
+    process.env.NEXT_PUBLIC_ACTIVE_MARKETS_MAINNET ??
+    (PRIMARY_NETWORK === "mainnet" ? process.env.NEXT_PUBLIC_ACTIVE_MARKETS : undefined),
+  testnet:
+    process.env.NEXT_PUBLIC_ACTIVE_MARKETS_TESTNET ??
+    (PRIMARY_NETWORK === "testnet" ? process.env.NEXT_PUBLIC_ACTIVE_MARKETS : undefined),
+};
+
+export const ACTIVE_MARKET_SYMBOLS = parseActiveMarketSymbols(
+  ACTIVE_MARKETS_ENV_BY_NETWORK[ACTIVE_NETWORK_ID]
+);
 
 export const ACTIVE_MARKETS: Record<string, MarketConfig> = Object.fromEntries(
   ACTIVE_MARKET_SYMBOLS.map((symbol) => [symbol, MARKETS[symbol]])

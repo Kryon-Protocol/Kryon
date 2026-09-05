@@ -599,7 +599,7 @@ async function run() {
     process.exit(1);
   }
 
-  const sql = neon(dbUrl);
+  let sql = neon(dbUrl);
   console.log("✓ Matcher service starting");
   console.log(`  Markets  : ${MATCHER_MARKETS.map((m) => m.symbol).join(", ")}`);
   console.log(`  Interval : ${POLL_INTERVAL_MS}ms`);
@@ -630,11 +630,15 @@ async function run() {
       const msg = e instanceof Error ? e.message : String(e);
       process.stderr.write(`  ✗ tick: ${msg.slice(0, 100)}\n`);
 
-      // On repeated DB errors, recreate the neon client (clears any stale state)
+      // On repeated DB errors, recreate the neon client (clears any stale state).
+      // Reassign `sql` itself rather than Object.assign onto it — the tagged-
+      // template call path invokes the client's own closure, which
+      // Object.assign cannot replace, so callers kept hitting the ended pool
+      // forever even after "recreating".
       if (consecutiveErrors >= 3) {
         process.stderr.write(`  ⟳ recreating DB connection after ${consecutiveErrors} errors\n`);
-        try { (sql as unknown as { end?: () => void }).end?.(); } catch { /* ignore */ }
-        Object.assign(sql, neon(dbUrl));
+        try { await sql.end(); } catch { /* ignore */ }
+        sql = neon(dbUrl);
         consecutiveErrors = 0;
       }
     }

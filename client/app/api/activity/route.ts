@@ -1,0 +1,130 @@
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+import { networkAwareCacheControl, networkFromRequest } from "@/lib/network-server";
+
+/**
+ * GET /api/activity — public "proof of activity" feed for the testnet
+ * dashboard. Aggregates across every market rather than one, unlike
+ * /api/markets/:id/trades and /api/fills (per-address).
+ */
+export async function GET(req: NextRequest) {
+  const network = networkFromRequest(req);
+  const fillsLimit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "50", 10) || 50, 200);
+
+  try {
+    const sql = db(network);
+
+    const [fillRows, marketRows, settlementRows, totalsRows, tradersRows] = await Promise.all([
+      sql`
+        SELECT
+          f.id, f."marketId" AS market_id, f."fillPrice" AS fill_price,
+          f."fillSize" AS fill_size, f."makerNonce" AS maker_nonce,
+          f."txHash" AS tx_hash, f."createdAt" AS created_at
+        FROM "Fill" f
+        WHERE f.network = ${network}
+        ORDER BY f."createdAt" DESC, f.id DESC
+        LIMIT ${fillsLimit}
+      `,
+      sql`
+        SELECT
+          id AS market_id, symbol, active,
+          "lastPrice" AS last_price, "volume" AS volume,
+          "longOpenInterest" AS long_open_interest,
+          "shortOpenInterest" AS short_open_interest,
+          "lastOraclePrice" AS last_oracle_price,
+          "updatedAt" AS updated_at
+        FROM "Market"
+        ORDER BY id ASC
+      `,
+      sql`
+        SELECT id, "submittedHash" AS submitted_hash, "updatedAt" AS confirmed_at
+        FROM "TxJob"
+        WHERE network = ${network} AND kind = 'settle_fill' AND status = 'CONFIRMED'
+          AND "submittedHash" IS NOT NULL
+        ORDER BY "updatedAt" DESC
+        LIMIT 20
+      `,
+      // Both volumes are computed directly from Fill (price × size), not from
+      // Market.volume — that column is an incrementally-updated counter that
+      // can drift from the ledger if a write is ever missed/retried; summing
+      // the raw fills is the ground truth and is what "total real volume" means.
+      sql`
+        SELECT
+          COUNT(*)::int AS trade_count,
+          COUNT(*) FILTER (WHERE "createdAt" > NOW() - INTERVAL '24 hours')::int AS trade_count_24h,
+          COALESCE(SUM(
+            FLOOR("fillSize"::numeric * "fillPrice"::numeric / 1000000000000000000::numeric)
+          ), 0)::text AS volume_total,
+          COALESCE(SUM(
+            FLOOR("fillSize"::numeric * "fillPrice"::numeric / 1000000000000000000::numeric)
+          ) FILTER (WHERE "createdAt" > NOW() - INTERVAL '24 hours'), 0)::text AS volume_24h
+        FROM "Fill"
+        WHERE network = ${network}
+      `,
+      // Unique traders: distinct addresses that have ever appeared as maker or
+      // taker on a settled fill — the closest thing to "real users", as opposed
+      // to distinct Account rows (which include unfunded/never-traded wallets).
+      sql`
+        SELECT COUNT(DISTINCT address)::int AS unique_traders
+        FROM (
+          SELECT maker AS address FROM "Fill" WHERE network = ${network}
+          UNION
+          SELECT taker AS address FROM "Fill" WHERE network = ${network}
+        ) t
+      `,
+    ]);
+
+    const recentFills = (fillRows as Record<string, unknown>[]).map((r) => ({
+      id: String(r.id),
+      marketId: Number(r.market_id),
+      price: String(r.fill_price),
+      size: String(r.fill_size),
+      side: (Number(r.maker_nonce) % 2 === 0 ? "buy" : "sell") as "buy" | "sell",
+      txHash: String(r.tx_hash),
+      createdAt: new Date(r.created_at as string).getTime(),
+    }));
+
+    const marketStats = (marketRows as Record<string, unknown>[]).map((r) => ({
+      marketId: Number(r.market_id),
+      symbol: String(r.symbol),
+      active: Boolean(r.active),
+      lastPrice: String(r.last_price),
+      volume: String(r.volume),
+      longOpenInterest: String(r.long_open_interest),
+      shortOpenInterest: String(r.short_open_interest),
+      lastOraclePrice: String(r.last_oracle_price),
+      updatedAt: new Date(r.updated_at as string).getTime(),
+    }));
+
+    const recentSettlements = (settlementRows as Record<string, unknown>[]).map((r) => ({
+      id: String(r.id),
+      txHash: String(r.submitted_hash),
+      confirmedAt: new Date(r.confirmed_at as string).getTime(),
+    }));
+
+    const totalsRow = (totalsRows as Record<string, unknown>[])[0];
+    const tradersRow = (tradersRows as Record<string, unknown>[])[0];
+    const totals = {
+      activeMarkets: marketStats.filter((m) => m.active).length,
+      tradeCount: Number(totalsRow?.trade_count ?? 0),
+      tradeCount24h: Number(totalsRow?.trade_count_24h ?? 0),
+      uniqueTraders: Number(tradersRow?.unique_traders ?? 0),
+      volume24h: String(totalsRow?.volume_24h ?? "0"),
+      volumeTotal: String(totalsRow?.volume_total ?? "0"),
+      openInterest: marketStats
+        .reduce((sum, m) => sum + Number(m.longOpenInterest) + Number(m.shortOpenInterest), 0)
+        .toString(),
+    };
+
+    return NextResponse.json(
+      { network, recentFills, marketStats, recentSettlements, totals },
+      { headers: { "Cache-Control": networkAwareCacheControl(req, "s-maxage=5, stale-while-revalidate=15") } }
+    );
+  } catch (e) {
+    console.error("activity feed error:", e);
+    return NextResponse.json(
+      { network, recentFills: [], marketStats: [], recentSettlements: [], totals: null, error: "activity_unavailable" },
+      { status: 500 }
+    );
+  }
+}
