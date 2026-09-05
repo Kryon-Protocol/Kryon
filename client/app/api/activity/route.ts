@@ -50,17 +50,17 @@ export async function GET(req: NextRequest) {
       // the raw fills is the ground truth and is what "total real volume" means.
       sql`
         SELECT
-          (SELECT COUNT(*)::int FROM "Fill" WHERE network = ${network} AND "txHash" NOT LIKE 'dbfill%') AS trade_count,
-          (SELECT COUNT(*)::int FROM "Fill" WHERE network = ${network} AND "txHash" NOT LIKE 'dbfill%' AND "createdAt" > NOW() - INTERVAL '24 hours') AS trade_count_24h,
-          (SELECT (COALESCE(SUM(FLOOR(o."filledSize"::numeric * (CASE WHEN o."limitPrice" = '0' THEN m."lastPrice"::numeric ELSE o."limitPrice"::numeric END) / 1000000000000000000::numeric)), 0) / 2)::text FROM "Order" o JOIN "Market" m ON o."marketId" = m.id) AS volume_total,
-          (SELECT (COALESCE(SUM(FLOOR(o."filledSize"::numeric * (CASE WHEN o."limitPrice" = '0' THEN m."lastPrice"::numeric ELSE o."limitPrice"::numeric END) / 1000000000000000000::numeric)) FILTER (WHERE o."updatedAt" > NOW() - INTERVAL '24 hours'), 0) / 2)::text FROM "Order" o JOIN "Market" m ON o."marketId" = m.id) AS volume_24h
+          (SELECT (COUNT(*)::int / 2) FROM "Order" WHERE "filledSize"::numeric > 0) AS trade_count,
+          (SELECT (COUNT(*)::int / 2) FROM "Order" WHERE "filledSize"::numeric > 0 AND "updatedAt" > NOW() - INTERVAL '24 hours') AS trade_count_24h,
+          (SELECT (COALESCE(SUM(FLOOR(o."filledSize"::numeric * (CASE WHEN o."limitPrice" = '0' THEN m."lastPrice"::numeric ELSE o."limitPrice"::numeric END) / 1000000000000000000::numeric)), 0) / 2)::numeric::bigint::text FROM "Order" o JOIN "Market" m ON o."marketId" = m.id) AS volume_total,
+          (SELECT (COALESCE(SUM(FLOOR(o."filledSize"::numeric * (CASE WHEN o."limitPrice" = '0' THEN m."lastPrice"::numeric ELSE o."limitPrice"::numeric END) / 1000000000000000000::numeric)) FILTER (WHERE o."updatedAt" > NOW() - INTERVAL '24 hours'), 0) / 2)::numeric::bigint::text FROM "Order" o JOIN "Market" m ON o."marketId" = m.id) AS volume_24h
       `,
       sql`
         SELECT
           o."marketId" AS market_id,
           (COALESCE(SUM(
             FLOOR(o."filledSize"::numeric * (CASE WHEN o."limitPrice" = '0' THEN m."lastPrice"::numeric ELSE o."limitPrice"::numeric END) / 1000000000000000000::numeric)
-          ), 0) / 2)::text AS real_volume
+          ), 0) / 2)::numeric::bigint::text AS real_volume
         FROM "Order" o
         JOIN "Market" m ON o."marketId" = m.id
         GROUP BY o."marketId"
