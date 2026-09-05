@@ -13,3 +13,4 @@ COPY . .
 RUN npm install tsx pm2 --save-dev
 
 CMD ["bash", "scripts/railway-testnet-entrypoint.sh"]
+# cache-bust: force fresh Railway build-plan resolution
