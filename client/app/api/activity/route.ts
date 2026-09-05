@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
             FLOOR("fillSize"::numeric * "fillPrice"::numeric / 1000000000000000000::numeric)
           ) FILTER (WHERE "createdAt" > NOW() - INTERVAL '24 hours'), 0)::text AS volume_24h
         FROM "Fill"
-        WHERE network = ${network}
+        WHERE network = ${network} AND "txHash" NOT LIKE 'dbfill%'
       `,
       sql`
         SELECT
@@ -68,7 +68,7 @@ export async function GET(req: NextRequest) {
             FLOOR("fillSize"::numeric * "fillPrice"::numeric / 1000000000000000000::numeric)
           ), 0)::text AS real_volume
         FROM "Fill"
-        WHERE network = ${network}
+        WHERE network = ${network} AND "txHash" NOT LIKE 'dbfill%'
         GROUP BY "marketId"
       `,
       // Unique traders: distinct addresses that have ever appeared as maker or
