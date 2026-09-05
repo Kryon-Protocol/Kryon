@@ -66,9 +66,22 @@ function isNeonUrl(url: string): boolean {
 // pooling matters: a fresh connection per query would swamp a small box.
 const pools = new Map<string, Pool>();
 
+/** `pg` marks a pool `ending`/`ended`; neither is in the published typings. */
+function poolIsDead(pool: Pool): boolean {
+  const p = pool as unknown as { ending?: boolean; ended?: boolean };
+  return p.ending === true || p.ended === true;
+}
+
 function getPool(url: string): Pool {
   let pool = pools.get(url);
-  if (pool) return pool;
+  // A pool that has been ended can never serve another query ("Cannot use a
+  // pool after calling end on the pool"). Because pools are shared per URL, one
+  // caller ending it — matcher-service.ts does exactly that to recover from
+  // repeated tick errors — would otherwise poison every other module holding a
+  // client over the same instance, permanently, until the process restarted.
+  // Treat an ended pool as absent so the next query transparently rebuilds it.
+  if (pool && !poolIsDead(pool)) return pool;
+  if (pool) pools.delete(url);
 
   const cfg: PoolConfig = {
     connectionString: url,
@@ -120,23 +133,28 @@ function buildQuery(strings: TemplateStringsArray, values: unknown[]): { text: s
 export function neon(url: string): SqlClient {
   if (isNeonUrl(url)) return neonHttp(url) as unknown as SqlClient;
 
-  const pool = getPool(url);
+  // Resolve the pool per query rather than capturing it here. Capturing meant a
+  // client built before someone else called .end() kept querying the dead pool
+  // forever; going through getPool() each time lets a rebuilt pool be picked up
+  // transparently by every existing client.
+  getPool(url); // fail fast on a malformed URL at construction time
 
   const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const { text, params } = buildQuery(strings, values);
-    const res = await pool.query(text, params as never[]);
+    const res = await getPool(url).query(text, params as never[]);
     return res.rows as Row[];
   }) as SqlClient;
 
   // Neon's .query resolves to the rows array itself, not a QueryResult.
   client.query = async (text: string, params: unknown[] = []) => {
-    const res = await pool.query(text, params as never[]);
+    const res = await getPool(url).query(text, params as never[]);
     return res.rows as Row[];
   };
   client.unsafe = (text: string) => new RawSql(text);
   client.end = async () => {
+    const pool = pools.get(url);
     pools.delete(url);
-    await pool.end();
+    if (pool) await pool.end();
   };
 
   return client;
