@@ -79,6 +79,8 @@ export async function GET(req: NextRequest) {
           SELECT maker AS address, MAX("createdAt") AS last_trade FROM "Fill" WHERE network = ${network} GROUP BY maker
           UNION ALL
           SELECT taker AS address, MAX("createdAt") AS last_trade FROM "Fill" WHERE network = ${network} GROUP BY taker
+          UNION ALL
+          SELECT owner AS address, MAX("createdAt") AS last_trade FROM "Order" GROUP BY owner
         ) t
         GROUP BY address
         ORDER BY last_trade_at DESC
