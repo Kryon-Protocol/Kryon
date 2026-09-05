@@ -117,6 +117,38 @@ export function cancelSigningMessage(
   ]);
 }
 
+/**
+ * Canonical message for a bulk cancel.
+ *
+ * Unlike a single cancel there is no nonce to bind the signature to, so a
+ * captured signature would otherwise cancel every future order the account
+ * places, forever. `issuedAt` bounds that: the server rejects a message whose
+ * timestamp is outside a short window, making a captured signature useless
+ * within a minute.
+ *
+ * `marketId` scopes the cancel; the literal string "all" means every market.
+ * It is part of the signed bytes so a signature for one market cannot be
+ * replayed to wipe the account's whole book.
+ */
+export function cancelAllSigningMessage(
+  owner: string,
+  issuedAt: bigint | number | string,
+  marketId: number | "all",
+  networkPassphrase: string = NETWORK.passphrase
+): string {
+  return canonicalPairs([
+    ["domain", APP_DOMAIN],
+    ["action", "cancel_all"],
+    ["network", networkPassphrase],
+    ["owner", owner],
+    ["market_id", String(marketId)],
+    ["issued_at", issuedAt.toString()],
+  ]);
+}
+
+/** How far from the server's clock a `cancel_all` signature stays valid. */
+export const CANCEL_ALL_WINDOW_SECONDS = 60;
+
 export function assertU64(n: bigint): boolean {
   return n >= 0n && n <= MAX_U64;
 }
