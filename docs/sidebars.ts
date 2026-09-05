@@ -33,6 +33,20 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: "category",
+      label: "Build an Agent",
+      collapsed: false,
+      items: [
+        "agents/quickstart",
+        "agents/signing",
+        "agents/units",
+        "agents/lifecycle",
+        "agents/risk",
+        "agents/funding",
+        "agents/mainnet",
+      ],
+    },
+    {
+      type: "category",
       label: "APIs",
       items: ["api/rest", "api/websocket"],
     },
