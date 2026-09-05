@@ -41,10 +41,15 @@ interface Totals {
   volumeTotal: string;
   openInterest: string;
 }
+interface UniqueTrader {
+  address: string;
+  lastTradeAt: number;
+}
 interface ActivityResp {
   recentFills: Fill[];
   marketStats: MarketStat[];
   recentSettlements: Settlement[];
+  uniqueTraders: UniqueTrader[];
   totals: Totals | null;
 }
 
@@ -109,6 +114,7 @@ export default function DashboardPage() {
   const fills = data?.recentFills ?? [];
   const markets = data?.marketStats ?? [];
   const settlements = data?.recentSettlements ?? [];
+  const uniqueTraders = data?.uniqueTraders ?? [];
 
   return (
     <div
@@ -248,6 +254,30 @@ export default function DashboardPage() {
                 >
                   <span className="text-[#a3a3a3]">{timeAgo(s.confirmedAt)}</span>
                   <TxLink hash={s.txHash} />
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        {/* Active Traders */}
+        <Panel title="Active Traders" subtitle="Unique wallets that have traded on the network.">
+          <div className="flex flex-col">
+            {isLoading ? (
+              <div className="py-10 text-center text-[13px] text-[#737373]">Loading…</div>
+            ) : uniqueTraders.length === 0 ? (
+              <div className="py-10 text-center text-[13px] text-[#737373]">No traders yet.</div>
+            ) : (
+              uniqueTraders.map((t) => (
+                <div
+                  key={t.address}
+                  className="flex items-center justify-between px-4 py-3 text-[13px] border-b border-[#2A2A31] last:border-b-0"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-[#1fae5b]"></span>
+                    <span className="font-mono text-[#f5f5f5]">{t.address}</span>
+                  </div>
+                  <span className="text-[#a3a3a3]">Last trade: {timeAgo(t.lastTradeAt)}</span>
                 </div>
               ))
             )}

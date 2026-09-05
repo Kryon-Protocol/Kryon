@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   try {
     const sql = db(network);
 
-    const [fillRows, marketRows, settlementRows, totalsRows, tradersRows] = await Promise.all([
+    const [fillRows, marketRows, settlementRows, totalsRows, marketVolumeRows, tradersRows] = await Promise.all([
       sql`
         SELECT
           f.id, f."marketId" AS market_id, f."fillPrice" AS fill_price,
@@ -61,16 +61,28 @@ export async function GET(req: NextRequest) {
         FROM "Fill"
         WHERE network = ${network}
       `,
-      // Unique traders: distinct addresses that have ever appeared as maker or
-      // taker on a settled fill — the closest thing to "real users", as opposed
-      // to distinct Account rows (which include unfunded/never-traded wallets).
       sql`
-        SELECT COUNT(DISTINCT address)::int AS unique_traders
+        SELECT
+          "marketId" AS market_id,
+          COALESCE(SUM(
+            FLOOR("fillSize"::numeric * "fillPrice"::numeric / 1000000000000000000::numeric)
+          ), 0)::text AS real_volume
+        FROM "Fill"
+        WHERE network = ${network}
+        GROUP BY "marketId"
+      `,
+      // Unique traders: distinct addresses that have ever appeared as maker or
+      // taker on a settled fill — the closest thing to "real users".
+      sql`
+        SELECT address, MAX(last_trade) AS last_trade_at
         FROM (
-          SELECT maker AS address FROM "Fill" WHERE network = ${network}
-          UNION
-          SELECT taker AS address FROM "Fill" WHERE network = ${network}
+          SELECT maker AS address, MAX("createdAt") AS last_trade FROM "Fill" WHERE network = ${network} GROUP BY maker
+          UNION ALL
+          SELECT taker AS address, MAX("createdAt") AS last_trade FROM "Fill" WHERE network = ${network} GROUP BY taker
         ) t
+        GROUP BY address
+        ORDER BY last_trade_at DESC
+        LIMIT 100
       `,
     ]);
 
@@ -84,12 +96,19 @@ export async function GET(req: NextRequest) {
       createdAt: new Date(r.created_at as string).getTime(),
     }));
 
+    const marketVolumes = new Map(
+      (marketVolumeRows as Record<string, unknown>[]).map((r) => [
+        Number(r.market_id),
+        String(r.real_volume),
+      ])
+    );
+
     const marketStats = (marketRows as Record<string, unknown>[]).map((r) => ({
       marketId: Number(r.market_id),
       symbol: String(r.symbol),
       active: Boolean(r.active),
       lastPrice: String(r.last_price),
-      volume: String(r.volume),
+      volume: marketVolumes.get(Number(r.market_id)) ?? "0",
       longOpenInterest: String(r.long_open_interest),
       shortOpenInterest: String(r.short_open_interest),
       lastOraclePrice: String(r.last_oracle_price),
@@ -102,13 +121,17 @@ export async function GET(req: NextRequest) {
       confirmedAt: new Date(r.confirmed_at as string).getTime(),
     }));
 
+    const uniqueTradersList = (tradersRows as Record<string, unknown>[]).map((r) => ({
+      address: String(r.address),
+      lastTradeAt: new Date(r.last_trade_at as string).getTime(),
+    }));
+
     const totalsRow = (totalsRows as Record<string, unknown>[])[0];
-    const tradersRow = (tradersRows as Record<string, unknown>[])[0];
     const totals = {
       activeMarkets: marketStats.filter((m) => m.active).length,
       tradeCount: Number(totalsRow?.trade_count ?? 0),
       tradeCount24h: Number(totalsRow?.trade_count_24h ?? 0),
-      uniqueTraders: Number(tradersRow?.unique_traders ?? 0),
+      uniqueTraders: uniqueTradersList.length, // total derived from the list size
       volume24h: String(totalsRow?.volume_24h ?? "0"),
       volumeTotal: String(totalsRow?.volume_total ?? "0"),
       openInterest: marketStats
@@ -117,13 +140,13 @@ export async function GET(req: NextRequest) {
     };
 
     return NextResponse.json(
-      { network, recentFills, marketStats, recentSettlements, totals },
+      { network, recentFills, marketStats, recentSettlements, uniqueTraders: uniqueTradersList, totals },
       { headers: { "Cache-Control": networkAwareCacheControl(req, "s-maxage=5, stale-while-revalidate=15") } }
     );
   } catch (e) {
     console.error("activity feed error:", e);
     return NextResponse.json(
-      { network, recentFills: [], marketStats: [], recentSettlements: [], totals: null, error: "activity_unavailable" },
+      { network, recentFills: [], marketStats: [], recentSettlements: [], uniqueTraders: [], totals: null, error: "activity_unavailable" },
       { status: 500 }
     );
   }
