@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # Railway start command for the testnet keeper fleet.
+# (pm2 is installed at build time, not fetched via npx at runtime.)
 #
 # ecosystem.testnet.config.cjs launches every keeper via
 # `tsx --env-file=.env.testnet ...`, which needs a real file on disk — but
