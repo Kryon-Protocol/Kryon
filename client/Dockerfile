@@ -1,4 +1,5 @@
 FROM node:22-alpine
+RUN apk add --no-cache bash
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
@@ -13,4 +14,3 @@ COPY . .
 RUN npm install tsx pm2 --save-dev
 
 CMD ["bash", "scripts/railway-testnet-entrypoint.sh"]
-# cache-bust: force fresh Railway build-plan resolution
