@@ -6,3 +6,7 @@
 /infra/budget/reports/
 npm-debug.log*
 yarn-error.log*
+
+# E2E harness — writes rows into the live testnet database and never cleans up.
+# Operator tooling, not part of the shipped protocol.
+/e2e/

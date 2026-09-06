@@ -1,5 +1,5 @@
 {
-  "name": "redegined-perp",
+  "name": "kryon-protocol",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,9 +8,6 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "e2e": "node e2e/run-all.mjs",
-    "e2e:db": "node e2e/db-smoke.mjs",
-    "e2e:testnet:preflight": "node e2e/testnet-preflight.mjs",
     "audit:package": "bash infra/audit/build-audit-package.sh",
     "budget:simulate": "bash infra/budget/simulate-soroban-budgets.sh",
     "deploy:role-transfer": "bash infra/deploy/role-transfer.sh"
