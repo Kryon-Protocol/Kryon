@@ -81,17 +81,26 @@ pub fn account_health(
     // underwater signal; do NOT clamp to 0 or the equity check won't fire.
     let cross_collateral = checked_sub(total_collateral_value, locked_isolated_margin)?;
 
-    // Second pass: compute isolated equity contribution and cross unrealized pnl separately
+    // Second pass: split unrealised pnl into its cross and isolated halves. The
+    // split drives the per-mode liquidation triggers below; it does NOT change
+    // total equity.
+    //
+    // KRY-Q5: isolated losses are NOT floored at the locked margin here.
+    // Flooring them encoded a containment promise the ledger does not keep:
+    // `reduce_position_internal` and `settle_position_funding` both push
+    // realised pnl and funding through `vault_apply_pnl` against the account's
+    // single settlement balance, with no isolated bucket — so an isolated loss
+    // beyond its margin DOES consume cross collateral the moment it realises.
+    // With the floor, an account looked healthy right up until the position
+    // closed and then was suddenly underwater. Counting the loss in full makes
+    // equity match the balance that actually backs it, and can only make an
+    // account look worse, never better — the safe direction for a margin check.
     let mut isolated_equity = 0i128;
     let mut cross_unrealized = 0i128;
     for (idx, p) in account.positions.iter().enumerate() {
         let upnl = pnl_buf[idx];
         if p.mode == MarginMode::Isolated {
-            // Isolated position's contribution to equity is capped at 0 on the downside
-            // (losses beyond the locked margin cannot consume cross collateral)
-            let pos_equity = checked_add(p.margin, upnl)?;
-            isolated_equity =
-                checked_add(isolated_equity, if pos_equity > 0 { pos_equity } else { 0 })?;
+            isolated_equity = checked_add(isolated_equity, checked_add(p.margin, upnl)?)?;
         } else {
             cross_unrealized = checked_add(cross_unrealized, upnl)?;
         }
@@ -99,7 +108,10 @@ pub fn account_health(
 
     let unrealized_pnl = add_signed(&pnl_buf[..pnl_count])?;
 
-    // Total equity = free cross collateral + cross unrealized pnl + sum of isolated equities
+    // Total equity = free cross collateral + cross unrealised pnl + isolated
+    // equity. With the floor gone this reduces exactly to
+    // `total_collateral_value + unrealized_pnl` — the locked margin cancels —
+    // which is the same number the vault's balances add up to.
     let equity = checked_add(
         checked_add(cross_collateral, cross_unrealized)?,
         isolated_equity,
@@ -292,8 +304,14 @@ mod tests {
         let health = account_health(&env, &account, &markets).unwrap();
         // unrealized pnl = (1 - 100) * 10 = -990
         assert_eq!(health.unrealized_pnl, -990 * PRECISION);
-        // equity should be 900 (cross collateral only; isolated pos equity capped at 0)
-        assert_eq!(health.equity, 900 * PRECISION);
+        // KRY-Q5: the isolated loss is counted in full, not floored at the 100
+        // of locked margin. Equity = 1000 collateral - 990 loss = 10, which is
+        // what the vault balance will actually read once the position closes:
+        // realised pnl goes through `apply_pnl` against the one settlement
+        // balance, so the loss reaches cross collateral regardless of mode.
+        // The old floored answer (900) claimed 890 of collateral that was
+        // already gone.
+        assert_eq!(health.equity, 10 * PRECISION);
         // isolated pos is liquidatable (iso_equity = 100 + (-990) = -890 < iso_maintenance)
         assert!(health.liquidatable);
     }
@@ -363,8 +381,17 @@ mod tests {
         // Isolated: iso_equity = 100 + (-990) = -890 < iso_maintenance → isolated IS liquidatable
         assert!(health.liquidatable);
 
-        // Verify cross portion is healthy: equity >> maintenance
-        // Total equity = 1900 (cross) + 0 (isolated capped) = 1900
-        assert_eq!(health.equity, 1_900 * PRECISION);
+        // The cross LIQUIDATION TRIGGER still ignores the isolated loss — that
+        // separation is real and is what this test is named for: a blown
+        // isolated position must not by itself liquidate the cross book.
+        assert!(
+            !health.margin_ratio.is_negative(),
+            "cross side is comfortably solvent",
+        );
+
+        // Total EQUITY, though, counts the isolated loss in full (KRY-Q5):
+        // 2000 collateral - 990 loss = 1010. Reporting 1900 would have told the
+        // account it still had 890 that the settlement balance no longer backs.
+        assert_eq!(health.equity, 1_010 * PRECISION);
     }
 }
