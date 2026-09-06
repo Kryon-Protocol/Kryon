@@ -253,14 +253,12 @@ flowchart LR
     subgraph CR["kryon-protocol/crates"]
         PC["protocol-core<br/>fixed · accounting<br/>oracle · types · error"]
         RE["risk-engine<br/>margin · funding<br/>liquidation"]
-        OT["order-types<br/>canonical order and fill types"]
     end
     PC --> RE
-    PC --> OT
+    PC --> C4["perp-order-gateway"]
     RE --> C1["perp-engine"]
     RE --> C2["perp-vault"]
     RE --> C3["perp-liquidation"]
-    OT --> C4["perp-order-gateway"]
 ```
 
 - **`protocol-core/fixed.rs`** — the arithmetic floor. `PRECISION = 1e18`,
@@ -278,9 +276,9 @@ flowchart LR
 
 ## Layer 3 — Off-chain services
 
-Seven always-on Node processes under PM2 (`client/ecosystem.config.cjs`), plus
-their Rust counterparts in `kryon-protocol/services/`. These hold signing keys
-and run loops, so they are **workers, never serverless functions**.
+Seven always-on Node processes under PM2 (`client/ecosystem.config.cjs`). These
+hold signing keys and run loops, so they are **workers, never serverless
+functions**.
 
 ```mermaid
 flowchart TB
@@ -537,11 +535,8 @@ Kryon/
 │   │   ├── perp-insurance/         bad-debt backstop
 │   │   ├── perp-risk/              risk parameters
 │   │   └── perp-governance/        48h timelock · guardian
-│   ├── crates/             # shared math: protocol-core · risk-engine · order-types
-│   ├── services/           # Rust services: matcher · oracle-keeper · indexer-api
-│   │                       #   keepers · monitoring · node-runtime
+│   ├── crates/             # shared math: protocol-core · risk-engine
 │   ├── prisma/schema.prisma# 27 models
-│   ├── testing/hardening/  # executable service-level invariant checks
 │   └── infra/
 ├── client/
 │   ├── app/                # Next.js pages + /api routes

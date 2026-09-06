@@ -676,19 +676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hardening"
-version = "0.1.0"
-dependencies = [
- "indexer-api",
- "keepers",
- "monitoring",
- "order-types",
- "protocol-core",
- "risk-engine",
- "soroban-sdk",
-]
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -789,15 +776,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
-name = "indexer-api"
-version = "0.1.0"
-dependencies = [
- "order-types",
- "protocol-core",
- "soroban-sdk",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -875,15 +853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keepers"
-version = "0.1.0"
-dependencies = [
- "protocol-core",
- "risk-engine",
- "soroban-sdk",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -913,39 +882,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "matcher"
-version = "0.1.0"
-dependencies = [
- "order-types",
- "protocol-core",
- "soroban-sdk",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
-
-[[package]]
-name = "monitoring"
-version = "0.1.0"
-dependencies = [
- "protocol-core",
- "soroban-sdk",
-]
-
-[[package]]
-name = "node-runtime"
-version = "0.1.0"
-dependencies = [
- "indexer-api",
- "keepers",
- "monitoring",
- "order-types",
- "protocol-core",
- "soroban-sdk",
-]
 
 [[package]]
 name = "num-bigint"
@@ -997,21 +937,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "oracle-keeper"
-version = "0.1.0"
-dependencies = [
- "protocol-core",
-]
-
-[[package]]
-name = "order-types"
-version = "0.1.0"
-dependencies = [
- "protocol-core",
- "soroban-sdk",
-]
 
 [[package]]
 name = "p256"

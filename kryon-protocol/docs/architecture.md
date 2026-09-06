@@ -74,41 +74,13 @@ contracts/perp-governance
   deliberately records and gates governance intent; production deployment
   scripts execute target-specific admin calls only after the timelock matures.
 
-crates/order-types
-  shared order and matched-fill models used by the off-chain matcher and the
-  on-chain settlement gateway shape.
-
-services/matcher
-  deterministic in-memory CLOB core. It keeps price-time priority, produces
-  gateway-compatible fills, handles cancels/replaces/market orders/expiry, and
-  never touches custody or position state directly.
-
-services/oracle-keeper
-  deterministic provider quote normalization. It converts provider-native
-  integer price/exponent pairs into protocol `PRECISION` units before calling
-  the Soroban oracle adapter's quorum publisher path.
-
-services/indexer-api
-  deterministic event replay and API view models. It reconstructs market
-  volume, fills by nonce, account positions, funding indexes, oracle state, and
-  bad debt from protocol events.
-
-services/keepers
-  keeper decision engine for stale oracle publication, funding updates, and
-  liquidation candidates. It is pure Rust so daemon implementations can be
-  replayed and tested without network side effects.
-
-services/monitoring
-  alert evaluation for runtime and oracle risk signals, including settlement
-  failures, liquidation backlog, matcher queue depth, bad debt, and stale feeds.
-
-services/node-runtime
-  operational runtime primitives. It exposes HTTP health/metrics/market routes,
-  an append-only event store, deterministic RPC event replay ingestion, and a
-  retry-aware transaction queue. Live deployments should replace the in-memory
-  store and replay source with database and Stellar RPC adapters while keeping
-  the same deterministic state transitions.
 ```
+
+Everything off-chain lives in `client/scripts/` as TypeScript under PM2: the
+matcher, oracle keeper, state indexer, WebSocket server, settlement reconciler,
+and the liquidation and TTL keepers. The workspace deliberately carries no Rust
+counterparts for them — a second implementation of the matching or keeper logic
+is a second thing to keep correct, and only one of them would ever run.
 
 The rule is deliberate: protocol-critical math is pure Rust first, with Soroban
 contracts acting as explicit authentication and storage boundaries.
@@ -123,43 +95,10 @@ contracts acting as explicit authentication and storage boundaries.
   accounting against actual token custody.
 - Minimize cross-contract call depth on liquidation and withdrawal paths.
 
-## Target Production Modules
+## What ships
 
-```text
-contracts/
-  perp-account/      account state, deposits, withdrawals, subaccounts
-  perp-governance/   timelock registry and emergency pause control
-  perp-engine/       market config, OI, position ledger, settlement
-  perp-insurance/    reward funding, bad debt, backstop accounting
-  perp-liquidation/  account-health liquidation execution
-  perp-order-gateway/ signed order settlement and replay protection
-  perp-risk/         account health, withdrawals, liquidation planning
-  perp-oracle-adapter/ normalized Reflector/Pyth/quorum snapshots and circuit breakers
-  perp-vault/        collateral custody, risk-gated withdrawals, vault reconciliation
-  perp-settlement/   PnL, fees, SLP/insurance waterfall
-
-services/
-  matcher/           off-chain order matching with on-chain verification
-  liquidator/        account scanner with deterministic liquidation hints
-  matcher-api/       API/WebSocket wrapper around services/matcher with
-                     persistence and settlement submission
-  oracle-keeper/     quorum price publisher and stale-feed alerts
-  keepers/           funding, liquidation, and oracle keeper decisions
-  indexer/           event sink, state reconstruction, API
-  monitoring/        metrics and alert evaluation
-  node-runtime/      HTTP/API routes, RPC ingestion, tx queue, persistence adapters
-
-sdk/
-  rust/
-  typescript/
-```
-
-This rebuild now has the shared core, pure risk engine, risk contract boundary,
-quorum-capable guarded oracle adapter, collateral vault, fee/funding-aware
-position engine, insurance fund, liquidation executor, on-chain matched-order
-settlement gateway, governance timelock registry, deterministic matcher core,
-oracle quote normalization service, indexer/API state views, keeper decision
-logic, monitoring alerts, node runtime primitives, deployment manifests,
-load/chaos simulations, and executable hardening checks. Production daemon
-processes still need live Stellar RPC, database, signer, and process-manager
-adapters for the target environment.
+Eight Soroban contracts (vault, engine, order gateway, oracle adapter,
+liquidation, insurance, risk, governance) over two pure crates
+(`protocol-core`, `risk-engine`), plus the Prisma/Postgres schema for the
+off-chain runtime state and the deployment manifests and runbooks under
+`infra/`.

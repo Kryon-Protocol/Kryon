@@ -1,33 +1,40 @@
-# Managed Signers
+# Signers
 
-No production service should hold a raw Stellar secret key in process memory.
+## What is in use today
 
-Supported signer boundary in `services/node-runtime`:
+Each off-chain role holds its own raw Stellar secret, supplied as an environment
+variable to the process that needs it and never shared between roles:
 
-- `Kms`
-- `Vault`
-- `Fireblocks`
-- `LocalDev`
+| Role | Variable | Used by |
+| --- | --- | --- |
+| Settlement operator | `MATCHER_OPERATOR_SECRET[_MAINNET\|_TESTNET]` | `scripts/matcher-service.ts`, `/api/settlements/[id]/sign` |
+| Oracle publisher | `ORACLE_PUBLISHER_SECRET[_MAINNET\|_TESTNET]` | `scripts/oracle-keeper.ts` |
+| Liquidator | `LIQUIDATOR_SECRET[_MAINNET\|_TESTNET]` | `scripts/liquidation-keeper.ts` |
+| Deployer / admin | operator-held, never in a service | `scripts/mainnet-deploy.ts` and friends |
 
-Production rules:
+The separation is not cosmetic. The matcher and oracle keeper shared one account
+early on, and the resulting `tx_bad_seq` collisions dropped settlements — which
+surfaced as "confirmation timeout" rather than as a key problem.
 
-- `LocalDev` is only for local/testnet smoke runs.
-- Keeper, oracle publisher, deployer, and governance signers must be separate.
-- Transaction payloads must be signed with explicit network passphrase binding.
-- Every submitted payload must be recorded in `TxJob` before signing.
-- Failed submissions must remain queryable for incident review.
+`client/lib/secrets-check.ts` runs at service startup: it fails the process on a
+missing or placeholder-looking secret, and on any secret exposed through a
+`NEXT_PUBLIC_` variable (which would bundle it into the browser).
 
-Required environment:
+## Rules
 
-```bash
-SIGNER_PROVIDER="kms"
-SIGNER_ACCOUNT="G..."
-KMS_KEY_ID="..."
-```
+- A key serves exactly one role. Keeper, oracle publisher, liquidator, deployer,
+  and governance signers are separate accounts.
+- Transaction payloads are signed with explicit network passphrase binding.
+- Every submitted settlement payload is recorded in `TxJob` before signing, and
+  failed submissions stay queryable for incident review.
+- Secrets reach production as platform secrets (Railway, systemd `EnvironmentFile`
+  with mode 600), never in the repository or an image layer.
 
-Alternative providers can use:
+## Not implemented
 
-```bash
-VAULT_TRANSIT_KEY="..."
-FIREBLOCKS_VAULT_ACCOUNT_ID="..."
-```
+There is no managed-signer boundary. An earlier design sketched a
+`SIGNER_PROVIDER` abstraction over KMS, Vault and Fireblocks; it was never wired
+to anything and has been removed rather than left as a config knob that does
+nothing. Moving the operator and liquidator keys behind a custody service is
+still the right hardening step before size limits are raised — it is open work,
+not a shipped feature.

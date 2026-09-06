@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/protocol-core",
-    "crates/order-types",
     "crates/risk-engine",
     "contracts/perp-engine",
     "contracts/perp-insurance",
@@ -12,13 +11,6 @@ members = [
     "contracts/perp-risk",
     "contracts/perp-vault",
     "contracts/perp-governance",
-    "services/matcher",
-    "services/oracle-keeper",
-    "services/indexer-api",
-    "services/keepers",
-    "services/monitoring",
-    "services/node-runtime",
-    "testing/hardening",
 ]
 
 [workspace.package]
@@ -31,7 +23,6 @@ rust-version = "1.84.0"
 [workspace.dependencies]
 soroban-sdk = "23.0.0"
 protocol-core = { path = "crates/protocol-core" }
-order-types = { path = "crates/order-types" }
 risk-engine = { path = "crates/risk-engine" }
 perp-oracle-adapter = { path = "contracts/perp-oracle-adapter" }
 perp-vault = { path = "contracts/perp-vault" }

@@ -99,13 +99,11 @@ The authorisation graph is strict: `Engine.open_position` requires the order gat
 ├── client/                  Next.js 16 trading terminal, API routes, off-chain service scripts
 │   ├── app/                 App Router pages (trade, portfolio, leaderboard, markets) + /api routes
 │   ├── features/            Trade terminal, chart, wallet, navbar feature modules
-│   ├── scripts/             Oracle keeper, matcher, indexer, WS server, reconciler, liquidator, test suites
+│   ├── scripts/             Oracle keeper, matcher, indexer, WS server, reconciler, liquidator, deploy tooling
 │   └── config/              Market configs, contract addresses, precision constants
 ├── kryon-protocol/          Rust workspace — the protocol itself
 │   ├── contracts/           8 Soroban contracts (vault, engine, gateway, oracle, risk, …)
-│   ├── crates/              protocol-core (fixed-point math, types), risk-engine, order-types
-│   ├── services/            Deterministic matcher/indexer/keeper/monitoring/runtime crates
-│   ├── testing/             Invariant, fuzz, hardening, and load/chaos harnesses
+│   ├── crates/              protocol-core (fixed-point math, types), risk-engine
 │   ├── infra/               Deploy manifests, runbooks, monitoring, signer/RPC ops
 │   └── prisma/              Postgres schema (orders, fills, positions, tx jobs, audit trail)
 ├── docs/                    Docusaurus engineering reference (served at /docs)
@@ -223,9 +221,6 @@ REST endpoints are Next.js route handlers under `client/app/api/**`: `orders` (s
 | Client unit | `npm test` | Price/size precision, market config, order-intent encoding, collateral maths |
 | Production gate | `npm run production:gate` | Config completeness before deploy |
 | Live gate | `npm run production:live-gate` | Live deployment health validation |
-
-`kryon-protocol/testing/hardening` carries the executable service-level
-invariant checks (deterministic replay, keeper/monitor agreement).
 
 End-to-end, load, soak and failure-recovery harnesses drive live testnet and
 mainnet deployments with real keys and real orders. They are operator tooling,
