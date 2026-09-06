@@ -181,15 +181,35 @@ async function call(
  * emergency-pause path; losing an operator secret can cost far more.
  */
 function writeSecretsOrRefuse(target: string, contents: string): void {
-  if (fs.existsSync(target) && fs.readFileSync(target, "utf8").trim().length > 0) {
-    throw new Error(
-      `refusing to overwrite existing secrets at ${target}\n` +
-      `    It holds the only copy of keys some deployment is still using.\n` +
-      `    Point DEPLOY_STATE_PATH at a new state file, or move that file aside first.`
-    );
-  }
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, contents, { mode: 0o600 });
+
+  // "wx" creates-or-fails in one syscall, so no other process can slip a
+  // secrets file in between the check and the write.
+  try {
+    const fd = fs.openSync(target, "wx", 0o600);
+    try { fs.writeFileSync(fd, contents); } finally { fs.closeSync(fd); }
+    return;
+  } catch (e: any) {
+    if (e?.code !== "EEXIST") throw e;
+  }
+
+  // The file already exists. Inspect and overwrite through a single descriptor
+  // so the emptiness check applies to the very bytes we are about to replace.
+  const fd = fs.openSync(target, "r+");
+  try {
+    if (fs.readFileSync(fd, "utf8").trim().length > 0) {
+      throw new Error(
+        `refusing to overwrite existing secrets at ${target}\n` +
+        `    It holds the only copy of keys some deployment is still using.\n` +
+        `    Point DEPLOY_STATE_PATH at a new state file, or move that file aside first.`
+      );
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, contents, 0, "utf8");
+    fs.fchmodSync(fd, 0o600);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 async function main() {
