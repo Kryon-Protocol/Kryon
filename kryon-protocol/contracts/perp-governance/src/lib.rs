@@ -99,6 +99,22 @@ impl PerpGovernanceContract {
         Ok(())
     }
 
+    /// Who currently admins this contract.
+    ///
+    /// The protocol's whole security model is "the admin is the governance
+    /// timelock" — and until this existed there was no way to CHECK that from
+    /// outside for most contracts. An auditor, a user, or the handover script
+    /// had to take it on faith. A claim nobody can verify is not a control.
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     pub fn queue(
         env: Env,
         id: BytesN<32>,
@@ -190,6 +206,18 @@ impl PerpGovernanceContract {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         Ok(())
+    }
+
+    /// The minimum timelock delay, in seconds. This is the number that makes
+    /// governance meaningful, so it must be readable without trusting a
+    /// deployment record.
+    pub fn min_delay(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::MinDelay)
+    }
+
+    /// The guardian able to veto execution via `emergency_pause`.
+    pub fn guardian(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Guardian)
     }
 
     pub fn paused(env: Env) -> bool {
