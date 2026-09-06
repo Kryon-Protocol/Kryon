@@ -55,7 +55,7 @@
 
 import {
   Keypair, Account, Contract, TransactionBuilder,
-  nativeToScVal, xdr, rpc as sorobanRpc,
+  nativeToScVal, scValToNative, xdr, rpc as sorobanRpc,
 } from "@stellar/stellar-sdk";
 import { CONTRACTS, NETWORK } from "@/config";
 
@@ -108,6 +108,25 @@ async function submit(
   throw new Error(`${label} confirmation timed out — hash ${send.hash}`);
 }
 
+/**
+ * The adapter's `Admin` lives in INSTANCE storage, which `stellar contract read`
+ * cannot reach (persistent/temporary only) — so fetch the contract instance
+ * entry over RPC and decode its storage map.
+ */
+async function readAdmin(server: sorobanRpc.Server): Promise<string | null> {
+  try {
+    const res = await server.getLedgerEntries(new Contract(CONTRACTS.oracleAdapter).getFootprint());
+    for (const entry of res.entries) {
+      const instance = (entry.val.contractData() as any).val().instance();
+      for (const slot of instance.storage() ?? []) {
+        const key = scValToNative(slot.key());
+        if (Array.isArray(key) ? key[0] === "Admin" : key === "Admin") return scValToNative(slot.val());
+      }
+    }
+  } catch { /* fall through — the guard is advisory, not a hard dependency */ }
+  return null;
+}
+
 async function main() {
   const adminSecret = process.env.ORACLE_ADMIN_SECRET;
   if (!adminSecret) {
@@ -133,6 +152,24 @@ async function main() {
   }
 
   const server = new sorobanRpc.Server(NETWORK.rpcUrl);
+
+  // Which adapter this hits comes from `@/config`, i.e. from whichever
+  // NEXT_PUBLIC_STELLAR_NETWORK the shell happens to have loaded — run it with
+  // .env.production.local sourced and it would aim at MAINNET while you hold a
+  // testnet admin key. Read the adapter's own Admin and refuse on a mismatch,
+  // so the wrong network or the wrong key fails here instead of as an opaque
+  // Unauthorized (#11) mid-submit.
+  const onChainAdmin = await readAdmin(server);
+  console.log(`Adapter admin  : ${onChainAdmin ?? "<unreadable>"}`);
+  if (onChainAdmin && onChainAdmin !== adminKp.publicKey()) {
+    console.error(
+      `\n❌  ORACLE_ADMIN_SECRET is ${adminKp.publicKey()}, but ${CONTRACTS.oracleAdapter}\n` +
+        `    on ${NETWORK.passphrase} is admin'd by ${onChainAdmin}.\n` +
+        `    Either the key is wrong, or NEXT_PUBLIC_STELLAR_NETWORK is pointing this\n` +
+        `    at the wrong deployment. Nothing was submitted.`
+    );
+    process.exit(1);
+  }
 
   console.log(`Network        : ${NETWORK.name}`);
   console.log(`Oracle adapter : ${CONTRACTS.oracleAdapter}`);

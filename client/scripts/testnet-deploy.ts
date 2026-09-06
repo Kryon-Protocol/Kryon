@@ -52,18 +52,33 @@ const USDC_CONTRACT = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
 
 const PROTO = path.resolve(__dirname, "../../kryon-protocol");
 const ARTIFACTS = path.join(PROTO, "target/wasm32v1-none/release/deploy");
-const STATE_PATH = path.join(PROTO, "infra/deploy/testnet-deployment-v2.json");
-const SECRETS_PATH = path.join(PROTO, "infra/deploy/testnet-secrets-v2.env");
+// Overridable so a fresh deployment does not resume into (and skip past) an
+// earlier one's checkpoints — rerunning against a completed state file would
+// silently do nothing and report success.
+const STATE_PATH = process.env.DEPLOY_STATE_PATH
+  ? path.resolve(process.env.DEPLOY_STATE_PATH)
+  : path.join(PROTO, "infra/deploy/testnet-deployment-v2.json");
+// Derived from the state file, NOT a fixed name. A hardcoded path is shared by
+// every deployment that ever runs this script, so a second run overwrites the
+// first deployment's guardian secret — while that deployment is still live and
+// still relying on the key. Keying it to the state file gives each deployment
+// its own secrets file.
+const SECRETS_PATH = STATE_PATH.replace(/(-deployment)?(-v\d+)?\.json$/, "") + "-secrets.env";
 
+// Pinned so the deploy refuses to ship WASM it does not recognise. These are
+// the multi-collateral release: seize_for_deficit + settle_deficit in the
+// vault, engine.set_vault, and upgrade() on every contract. Regenerate with
+//   python3 infra/deploy/optimize-wasm.py --all target/wasm32v1-none/release \
+//     target/wasm32v1-none/release/deploy && shasum -a 256 <dir>/*.wasm
 const EXPECTED_SHA256: Record<string, string> = {
-  perp_vault:         "063b932fb6b953a685bcb66b189b2143eda715650979095e39eb36c92ec7eaa2",
-  perp_engine:        "bc054afff1d44565a17381250e3a52127ee3d39b95c5eae582f43f0f6077e577",
-  perp_order_gateway: "0ba8f9707e2e70b35267da7ab9718e4cae2c3ba2917e90aa625d413e02fe4d6d",
-  perp_risk:          "87226639ea86545d54eaa2c81bf0658647434151ef2688179d76654307549f9d",
-  perp_oracle_adapter:"887b08be75d275a9760e796f6e96bc297223d7a8018cedc70e0f46d9086ebae8",
-  perp_insurance:     "26e0506ebf3e5954906ddd5ac80ed6f57c95d79480da56be9edc9a629ba79368",
-  perp_liquidation:   "08168a26fa82d64ed906c4e6d839508f70b7ac32c02595cfe3a3e64946e53cdb",
-  perp_governance:    "90f9b22631a09ec921847b3cfdf68a0734e4c7b9e7c1730f53bdf74515723220",
+  perp_vault:         "ddd3658dfc51022a1eed49769b04debcbd235386df22d536a303082d6f023fe7",
+  perp_engine:        "67dc771def5d329c1cf758dd8423ad7221053ba447a7b9db49062f89df14f2f1",
+  perp_order_gateway: "5a163c83ee26c7a2720358a116b8f60250dfafbefc840dfad6ad6d68af929626",
+  perp_risk:          "5128c35c1b3a000ed88841d8936a05d269c3ac82a2c5529ecbf1a1b494624eca",
+  perp_oracle_adapter:"cf50b4d039ec134b24c8ee485a4f73af6223e71a8df8573613c69eba73189e58",
+  perp_insurance:     "b13223c71457e20689fe2214d4eeae64119013fe88863565ecb5b3658eef95c8",
+  perp_liquidation:   "4932f8d18d38f62e9c855a9985bc12e4e44ec33448c497ee19cea5013bdc4433",
+  perp_governance:    "2f54dca257a3eafe3fcd1f8723154ec1f656b61dcbe947f66c8e9a561848c9db",
 };
 
 const PRECISION = BigInt("1000000000000000000");
@@ -161,6 +176,27 @@ async function call(
   throw new Error(`${label}: exhausted retries`);
 }
 
+
+/**
+ * Writes generated keys, refusing to destroy a secrets file that already exists.
+ *
+ * These files are the ONLY copy of the keys they hold — they are gitignored, so
+ * there is no history to recover from. Overwriting one silently strands the
+ * deployment that is still using those keys. Losing a guardian secret costs the
+ * emergency-pause path; losing an operator secret can cost far more.
+ */
+function writeSecretsOrRefuse(target: string, contents: string): void {
+  if (fs.existsSync(target) && fs.readFileSync(target, "utf8").trim().length > 0) {
+    throw new Error(
+      `refusing to overwrite existing secrets at ${target}\n` +
+      `    It holds the only copy of keys some deployment is still using.\n` +
+      `    Point DEPLOY_STATE_PATH at a new state file, or move that file aside first.`
+    );
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, contents, { mode: 0o600 });
+}
+
 async function main() {
   const secret = process.env.TESTNET_DEPLOYER_SECRET;
   if (!secret) { console.error("TESTNET_DEPLOYER_SECRET not set"); process.exit(1); }
@@ -219,7 +255,7 @@ async function main() {
           if (poll.status === "SUCCESS") break;
           if (poll.status === "FAILED") throw new Error("guardian account creation failed");
         }
-        fs.writeFileSync(SECRETS_PATH, `# guardian\nGUARDIAN_PUBLIC=${guardianKp.publicKey()}\nGUARDIAN_SECRET=${guardianKp.secret()}\n`, { mode: 0o600 });
+        writeSecretsOrRefuse(SECRETS_PATH, `# guardian\nGUARDIAN_PUBLIC=${guardianKp.publicKey()}\nGUARDIAN_SECRET=${guardianKp.secret()}\n`);
       }
     }
     state.ops!["oracle-publisher"] = { pub: ORACLE_PUB };
@@ -401,6 +437,11 @@ async function main() {
     ["wire_vault_insurance", VAULT,  "set_insurance",     [addr(INS)]],
     ["wire_vault_liq",       VAULT,  "set_liquidation",   [addr(LIQ)]],
     ["wire_ins_vault",       INS,    "set_vault",         [addr(VAULT)]],
+    // Vault operator for settle_deficit. Losses debit the settlement asset on
+    // every fill, so an account margined in another collateral carries a
+    // negative settlement balance while perfectly healthy; the liquidator
+    // keeper already watches accounts, so it clears them.
+    ["wire_vault_operator",  VAULT,  "set_operator",      [addr(OPS["liquidator"].pub)]],
   ];
   for (const [key, id, method, args] of wire) {
     if (done(key)) { console.log(`  ✓ ${key} already done`); continue; }

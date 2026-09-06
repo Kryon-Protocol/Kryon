@@ -75,6 +75,11 @@ const IDLE_GRACE_SECS = Number(process.env.IDLE_GRACE_SECS ?? "900");
 const MIN_SOURCES = Number(process.env.ORACLE_MIN_SOURCES ?? "2");
 const MAX_SOURCE_DEVIATION_BPS = Number(process.env.ORACLE_MAX_SOURCE_DEVIATION_BPS ?? "200");
 const USDC_DEPEG_HALT_BPS = Number(process.env.USDC_DEPEG_HALT_BPS ?? "100");
+// USDT0 (LayerZero OFT, mainnet only) is priced off USDT/USD. Publication is
+// opt-in because writing to a feed the adapter has not been configured with
+// errors: turn this on only AFTER set_feed has run for the USDT0 symbol.
+const PUBLISH_USDT0 = (process.env.ORACLE_PUBLISH_USDT0 ?? "false") === "true";
+const USDT0_DEPEG_HALT_BPS = Number(process.env.USDT0_DEPEG_HALT_BPS ?? "100");
 // Reflector cross-check. Disabled per-market when the market has no
 // `reflectorSymbol`; disabled globally with REFLECTOR_GUARD_ENABLED=false.
 const REFLECTOR_GUARD_ENABLED = (process.env.REFLECTOR_GUARD_ENABLED ?? "true") !== "false";
@@ -244,6 +249,7 @@ async function run() {
   console.log(`  Contract  : ${CONTRACTS.oracleAdapter}`);
   console.log(`  Markets   : ${ORACLE_MARKETS.map((m) => `${m.symbol}:${m.priceSourceSymbol}`).join(", ")}`);
   console.log(`  Fetch     : ${FETCH_INTERVAL_MS / 1000}s; publish on ${PUBLISH_DEVIATION_BPS}bps move or ${PUBLISH_HEARTBEAT_SECS}s heartbeat (USDC: ${USDC_PUBLISH_DEVIATION_BPS}bps/${USDC_PUBLISH_HEARTBEAT_SECS}s)`);
+  console.log(`  Stables   : USDC (peg guard ${USDC_DEPEG_HALT_BPS}bps)${PUBLISH_USDT0 ? `, USDT0 via USDT (peg guard ${USDT0_DEPEG_HALT_BPS}bps)` : ", USDT0 off"}`);
   console.log(
     `  Reflector : ${
       REFLECTOR_GUARD_ENABLED
@@ -403,16 +409,23 @@ async function run() {
     }
   }
 
-  // The settlement/collateral asset (USDC) needs a fresh on-chain price so the
-  // vault can value collateral during account_health. The price is SOURCED —
-  // on a depeg beyond USDC_DEPEG_HALT_BPS we stop publishing, so collateral
-  // valuation goes stale and the protocol fail-stops instead of valuing
-  // depegged USDC at par (deposit-and-drain vector).
-  async function publishUsdc() {
+  // Every collateral asset needs a fresh on-chain price so the vault can value
+  // it during account_health. Prices are SOURCED, never assumed at par — on a
+  // depeg beyond the halt threshold we stop publishing, so collateral valuation
+  // goes stale and the protocol fail-stops instead of valuing a depegged
+  // stablecoin at $1 (the deposit-and-drain vector).
+  //
+  // This matters more for USDT0 than USDC: it is a LayerZero OFT, so it can
+  // depeg from bridge failure as well as from issuer trouble.
+  async function publishStable(
+    oracleSymbol: string,
+    sourceAsset: string,
+    depegHaltBps: number
+  ) {
     try {
-      const agg = await aggregatePrice("USDC", [
-        () => coinbasePrice("USDC"),
-        () => krakenPrice("USDC"),
+      const agg = await aggregatePrice(sourceAsset, [
+        () => coinbasePrice(sourceAsset),
+        () => krakenPrice(sourceAsset),
       ]);
 
       let price: bigint;
@@ -422,8 +435,8 @@ async function run() {
           ((agg.price > PRICE_PRECISION ? agg.price - PRICE_PRECISION : PRICE_PRECISION - agg.price) * 10_000n) /
             PRICE_PRECISION
         );
-        if (deviationBps > USDC_DEPEG_HALT_BPS) {
-          console.error(`\n  ✗✗ USDC DEPEG: sourced $${(Number(agg.price) / 1e18).toFixed(4)} is ${deviationBps}bps off peg — HALTING USDC publication (settlement will fail-stop on staleness)`);
+        if (deviationBps > depegHaltBps) {
+          console.error(`\n  ✗✗ ${oracleSymbol} DEPEG: sourced $${(Number(agg.price) / 1e18).toFixed(4)} is ${deviationBps}bps off peg — HALTING ${oracleSymbol} publication (collateral valuation will fail-stop on staleness)`);
           return;
         }
         price = agg.price;
@@ -434,19 +447,19 @@ async function run() {
         price = PRICE_PRECISION;
         confidence = PRICE_PRECISION / 1000n;
       } else {
-        console.error("\n  ✗ USDC: sources unavailable on mainnet — skipping publish (fail-safe)");
+        console.error(`\n  ✗ ${oracleSymbol}: sources unavailable on mainnet — skipping publish (fail-safe)`);
         return;
       }
 
       if (DRY_RUN) {
-        console.log(`  ${"USDC".padEnd(9)} sourced $${(Number(price) / Number(PRICE_PRECISION)).toFixed(4)} (peg guard ${USDC_DEPEG_HALT_BPS}bps) → PUBLISH`);
+        console.log(`  ${oracleSymbol.padEnd(9)} sourced $${(Number(price) / Number(PRICE_PRECISION)).toFixed(4)} (peg guard ${depegHaltBps}bps) → PUBLISH`);
         return;
       }
-      if (!shouldPublish("USDC", price, USDC_PUBLISH_DEVIATION_BPS, USDC_PUBLISH_HEARTBEAT_SECS)) return;
+      if (!shouldPublish(oracleSymbol, price, USDC_PUBLISH_DEVIATION_BPS, USDC_PUBLISH_HEARTBEAT_SECS)) return;
       const priceHuman = Number(price) / Number(PRICE_PRECISION);
-      process.stdout.write(`\r  Publishing USDC $${priceHuman.toFixed(4)} at ${new Date().toISOString().slice(11, 19)}...`);
-      if (await writePrice("USDC", price, confidence, ledgerSafePublishTime())) {
-        lastPublished.set("USDC", { price, ts: Date.now() });
+      process.stdout.write(`\r  Publishing ${oracleSymbol} $${priceHuman.toFixed(4)} at ${new Date().toISOString().slice(11, 19)}...`);
+      if (await writePrice(oracleSymbol, price, confidence, ledgerSafePublishTime())) {
+        lastPublished.set(oracleSymbol, { price, ts: Date.now() });
       }
     } catch (e) {
       process.stdout.write(` ✗ ${(e as Error).message?.slice(0, 100)}\n`);
@@ -511,7 +524,10 @@ async function run() {
       // publisher's sequence number.
       if (PUBLISH_STAGGER_MS > 0) await sleep(PUBLISH_STAGGER_MS);
     }
-    await publishUsdc();
+    await publishStable("USDC", "USDC", USDC_DEPEG_HALT_BPS);
+    if (PUBLISH_USDT0) {
+      await publishStable("USDT0", "USDT", USDT0_DEPEG_HALT_BPS);
+    }
   }
 
   // Run immediately then on interval

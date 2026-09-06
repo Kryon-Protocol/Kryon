@@ -49,20 +49,32 @@ const USDC_CONTRACT = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
 
 const PROTO = path.resolve(__dirname, "../../kryon-protocol");
 const ARTIFACTS = path.join(PROTO, "target/wasm32v1-none/release/deploy");
-const STATE_PATH = path.join(PROTO, "infra/deploy/mainnet-deployment.json");
-const SECRETS_PATH = path.join(PROTO, "infra/deploy/mainnet-secrets.env");
+// Overridable so a new deployment does not resume into a completed one's
+// checkpoints and silently skip every step.
+const STATE_PATH = process.env.DEPLOY_STATE_PATH
+  ? path.resolve(process.env.DEPLOY_STATE_PATH)
+  : path.join(PROTO, "infra/deploy/mainnet-deployment.json");
+// Derived from the state file, NOT a fixed name. Step 1 mints fresh operator
+// and guardian keys and writes them here; with a fixed path a second run
+// overwrites the secrets of the deployment that is still live and still
+// controlling real funds. Keying it to the state file gives each deployment its
+// own file, and the guard below refuses to clobber one that already exists.
+const SECRETS_PATH = STATE_PATH.replace(/(-deployment)?(-v\d+)?\.json$/, "") + "-secrets.env";
 
 // sha256 of the artifacts that were mainnet-simulated (304.2 XLM total) and
 // testnet-rehearsed 2026-07-07. Deployment aborts on any mismatch.
+// The multi-collateral release, rehearsed on testnet as v3: seize_for_deficit
+// + settle_deficit in the vault, engine.set_vault, upgrade() everywhere.
+// Soroban bytecode is network-agnostic, so these are the same artifacts.
 const EXPECTED_SHA256: Record<string, string> = {
-  perp_vault:         "063b932fb6b953a685bcb66b189b2143eda715650979095e39eb36c92ec7eaa2",
-  perp_engine:        "bc054afff1d44565a17381250e3a52127ee3d39b95c5eae582f43f0f6077e577",
-  perp_order_gateway: "0ba8f9707e2e70b35267da7ab9718e4cae2c3ba2917e90aa625d413e02fe4d6d",
-  perp_risk:          "87226639ea86545d54eaa2c81bf0658647434151ef2688179d76654307549f9d",
-  perp_oracle_adapter:"887b08be75d275a9760e796f6e96bc297223d7a8018cedc70e0f46d9086ebae8",
-  perp_insurance:     "26e0506ebf3e5954906ddd5ac80ed6f57c95d79480da56be9edc9a629ba79368",
-  perp_liquidation:   "08168a26fa82d64ed906c4e6d839508f70b7ac32c02595cfe3a3e64946e53cdb",
-  perp_governance:    "90f9b22631a09ec921847b3cfdf68a0734e4c7b9e7c1730f53bdf74515723220",
+  perp_vault:         "ddd3658dfc51022a1eed49769b04debcbd235386df22d536a303082d6f023fe7",
+  perp_engine:        "67dc771def5d329c1cf758dd8423ad7221053ba447a7b9db49062f89df14f2f1",
+  perp_order_gateway: "5a163c83ee26c7a2720358a116b8f60250dfafbefc840dfad6ad6d68af929626",
+  perp_risk:          "5128c35c1b3a000ed88841d8936a05d269c3ac82a2c5529ecbf1a1b494624eca",
+  perp_oracle_adapter:"cf50b4d039ec134b24c8ee485a4f73af6223e71a8df8573613c69eba73189e58",
+  perp_insurance:     "b13223c71457e20689fe2214d4eeae64119013fe88863565ecb5b3658eef95c8",
+  perp_liquidation:   "4932f8d18d38f62e9c855a9985bc12e4e44ec33448c497ee19cea5013bdc4433",
+  perp_governance:    "2f54dca257a3eafe3fcd1f8723154ec1f656b61dcbe947f66c8e9a561848c9db",
 };
 
 const PRECISION = BigInt("1000000000000000000");
@@ -159,6 +171,27 @@ async function call(
   throw new Error(`${label}: exhausted retries`);
 }
 
+
+/**
+ * Writes generated keys, refusing to destroy a secrets file that already exists.
+ *
+ * These files are the ONLY copy of the keys they hold — they are gitignored, so
+ * there is no history to recover from. Overwriting one silently strands the
+ * deployment that is still using those keys. Losing a guardian secret costs the
+ * emergency-pause path; losing an operator secret can cost far more.
+ */
+function writeSecretsOrRefuse(target: string, contents: string): void {
+  if (fs.existsSync(target) && fs.readFileSync(target, "utf8").trim().length > 0) {
+    throw new Error(
+      `refusing to overwrite existing secrets at ${target}\n` +
+      `    It holds the only copy of keys some deployment is still using.\n` +
+      `    Point DEPLOY_STATE_PATH at a new state file, or move that file aside first.`
+    );
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, contents, { mode: 0o600 });
+}
+
 async function main() {
   const secret = process.env.MAINNET_DEPLOYER_SECRET;
   if (!secret) { console.error("MAINNET_DEPLOYER_SECRET not set"); process.exit(1); }
@@ -222,7 +255,7 @@ async function main() {
         if (poll.status === "SUCCESS") break;
         if (poll.status === "FAILED") throw new Error("ops account creation failed");
       }
-      fs.writeFileSync(SECRETS_PATH, lines.join("\n") + "\n", { mode: 0o600 });
+      writeSecretsOrRefuse(SECRETS_PATH, lines.join("\n") + "\n");
       for (const role of roles) state.ops![role] = { pub: kps[role].publicKey() };
       mark("ops_accounts");
       console.log(`  ✓ 4 accounts created, secrets → ${SECRETS_PATH} (chmod 600)`);

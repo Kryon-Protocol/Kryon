@@ -51,3 +51,6 @@ Audit Reports/
 AUDIT_REPORT.md
 FINAL_AUDIT_REPORT.md
 MainnetImpAudit.md
+
+# Build artifact shipped to the web box, never source
+*.tar.gz

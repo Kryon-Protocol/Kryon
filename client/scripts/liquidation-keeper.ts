@@ -45,6 +45,10 @@ type Sql = NeonQueryFunction<false, false>;
 const TICK_INTERVAL_MS = Number(process.env.LIQUIDATION_INTERVAL_MS ?? "5000");
 const MAX_ACCOUNTS_PER_TICK = Number(process.env.LIQUIDATION_MAX_ACCOUNTS ?? "500");
 const TTL_BUMP_INTERVAL_MS = 24 * 3600 * 1000; // daily
+// Opt-in because `settle_deficit` only exists on vaults deployed with
+// multi-collateral support; against an older vault every call would fail and
+// spam the log. Turn it on in the same release that deploys that vault.
+const SETTLE_DEFICITS = (process.env.VAULT_SETTLE_DEFICITS ?? "false") === "true";
 const FEE = "1000000";
 
 const ORACLE_SYMBOL_BY_MARKET = new Map<number, string>(
@@ -141,6 +145,74 @@ async function oraclePrice(server: sorobanRpc.Server, symbol: string): Promise<b
 }
 
 // ── Liquidation submission ────────────────────────────────────────────────────
+
+/** The account's settlement-asset balance. Negative means the vault is owed. */
+async function settlementBalance(
+  server: sorobanRpc.Server,
+  user: string
+): Promise<bigint | null> {
+  const val = await simulateRead(server, CONTRACTS.vault, "balance_of", [
+    new Address(user).toScVal(),
+    new Address(ASSETS.usdc).toScVal(),
+  ]);
+  // simulateRead already returns a native value, not an ScVal.
+  if (val === null || val === undefined) return null;
+  try {
+    return BigInt(val as string | number | bigint);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clears a negative settlement balance by seizing the account's other
+ * collateral at haircut value.
+ *
+ * Losses debit the settlement asset on every fill and funding application, so
+ * an account margined in another collateral (USDT0) runs a negative settlement
+ * balance while staying perfectly healthy. That balance is reserves the vault
+ * has already paid to the winning side, so it should not wait for a
+ * liquidation that may never come.
+ */
+async function settleDeficit(
+  server: sorobanRpc.Server,
+  liquidatorKp: Keypair,
+  user: string
+): Promise<string | null> {
+  const account = await server.getAccount(liquidatorKp.publicKey());
+  const tx = new TransactionBuilder(account, {
+    fee: FEE,
+    networkPassphrase: NETWORK.passphrase,
+  })
+    .addOperation(
+      new Contract(CONTRACTS.vault).call(
+        "settle_deficit",
+        new Address(liquidatorKp.publicKey()).toScVal(),
+        new Address(user).toScVal(),
+        new Address(ASSETS.usdc).toScVal()
+      )
+    )
+    .setTimeout(60)
+    .build();
+
+  const sim = await server.simulateTransaction(tx);
+  if (sorobanRpc.Api.isSimulationError(sim)) {
+    const err = (sim as sorobanRpc.Api.SimulateTransactionErrorResponse).error ?? "";
+    console.error(`  settle_deficit sim error (${user.slice(0, 8)}): ${err.slice(0, 160)}`);
+    return null;
+  }
+  const prepared = sorobanRpc.assembleTransaction(tx, sim).build();
+  prepared.sign(liquidatorKp);
+  const send = await server.sendTransaction(prepared);
+  if (send.status === "ERROR") return null;
+  for (let i = 0; i < 15; i++) {
+    await sleep(2000);
+    const poll = await server.getTransaction(send.hash);
+    if (poll.status === "SUCCESS") return send.hash;
+    if (poll.status === "FAILED") return null;
+  }
+  return null;
+}
 
 async function submitLiquidate(
   server: sorobanRpc.Server,
@@ -300,6 +372,7 @@ async function run() {
   console.log(`  Network    : ${NETWORK.name}`);
   console.log(`  Liquidator : ${liquidatorKp.publicKey()}`);
   console.log(`  Interval   : ${TICK_INTERVAL_MS / 1000}s`);
+  console.log(`  Deficits   : ${SETTLE_DEFICITS ? "settling (vault operator)" : "off"}`);
 
   let lastTtlBump = 0;
 
@@ -320,6 +393,20 @@ async function run() {
         // Skip malformed/non-account rows; one bad address must not kill the scan.
         if (!StrKey.isValidEd25519PublicKey(address)) continue;
         try {
+          // Deficits are settled for HEALTHY accounts too — that is the whole
+          // point, since a liquidation may never come for them.
+          if (SETTLE_DEFICITS) {
+            const settlement = await settlementBalance(server, address);
+            if (settlement !== null && settlement < 0n) {
+              const hash = await settleDeficit(server, liquidatorKp, address);
+              if (hash) {
+                console.log(
+                  `[${new Date().toISOString().slice(11, 19)}] settled deficit for ${address.slice(0, 8)} — ${hash}`
+                );
+              }
+            }
+          }
+
           const health = await accountHealth(server, address);
           if (!health?.liquidatable) continue;
           flagged++;

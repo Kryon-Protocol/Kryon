@@ -23,7 +23,10 @@ WEB_USER="${WEB_USER:-opc}"
 KEY="${KEY:-$HOME/.ssh/kryon-vm}"
 REPO="${REPO:-$HOME/Downloads/Kryon}"
 CLIENT="${REPO}/client"
-REMOTE="/home/${WEB_USER}/kryon-web"
+# /opt, not /home: systemd cannot write under user_home_t, so the unit runs the
+# app out of /opt/kryon-web. Shipping to ~/kryon-web deploys to a directory
+# nothing serves, and starting it there raises a SECOND server on port 3000.
+REMOTE="/opt/kryon-web"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()  { printf '\033[0;32m  ✓ %s\033[0m\n' "$*"; }
@@ -53,6 +56,11 @@ fi
 log "Assembling the bundle"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
+# mktemp -d makes the directory 0700, and `rsync -a` copies that mode onto
+# ${REMOTE} itself — leaving /opt/kryon-web unreadable by the service user, so
+# systemd restarts into "cannot open directory" while the still-running process
+# keeps serving from open fds. Looks healthy, is not. Set the mode we want served.
+chmod 755 "$STAGE"
 cp -R "${CLIENT}/.next/standalone/." "${STAGE}/"
 mkdir -p "${STAGE}/.next"
 cp -R "${CLIENT}/.next/static" "${STAGE}/.next/static"
@@ -61,10 +69,37 @@ ok "$(du -sh "$STAGE" | cut -f1) staged"
 
 # ── Ship ─────────────────────────────────────────────────────────────────────
 log "Shipping to ${WEB_HOST}"
-"${SSH[@]}" "mkdir -p ${REMOTE}"
-# --delete so a removed route or asset does not linger and get served.
-rsync -az --delete -e "ssh -i ${KEY} -o BatchMode=yes" \
+"${SSH[@]}" "sudo mkdir -p ${REMOTE}"
+
+# Keep the previous bundle so a bad deploy is one `mv` away from rolled back.
+# SKIP_BACKUP=1 when retrying a failed ship: the existing .prev is the last
+# KNOWN-GOOD tree, and re-copying would overwrite it with the half-shipped one.
+if [[ -z "${SKIP_BACKUP:-}" ]]; then
+  "${SSH[@]}" "sudo rm -rf ${REMOTE}.prev && sudo cp -a ${REMOTE} ${REMOTE}.prev"
+  ok "previous bundle saved to ${REMOTE}.prev"
+else
+  ok "SKIP_BACKUP=1 — keeping the existing ${REMOTE}.prev"
+fi
+
+# --delete so a removed route or asset does not linger and get served — but
+# .env.local lives ONLY on the box (DATABASE_URL_*, UPSTASH_*, operator secrets)
+# and is not in the staged bundle, so without this exclude --delete wipes it and
+# the app comes back up with no database.
+#
+# --rsync-path="sudo rsync": /opt is root-owned and the existing tree carries the
+# BUILD machine's uid (501:games, preserved by an earlier -a from macOS), so a
+# plain rsync as ${WEB_USER} cannot write into it.
+#
+# The chown is a separate step rather than rsync's --chown because macOS ships
+# rsync 2.6.9, which does not have that flag (it fails "unrecognized option").
+# No -z: this box is 1/8 OCPU with ~60MB free, and gzip on both ends is enough
+# to make sshd drop the connection mid-transfer (observed 2026-09-06). --partial
+# keeps what did land so a retry resumes instead of restarting from zero.
+rsync -a --partial --delete --exclude='.env.local' --exclude='.env.production.local' \
+  --rsync-path="sudo rsync" \
+  -e "ssh -i ${KEY} -o BatchMode=yes" \
   "${STAGE}/" "${WEB_USER}@${WEB_HOST}:${REMOTE}/"
+"${SSH[@]}" "sudo chown -R ${WEB_USER}:${WEB_USER} ${REMOTE}"
 ok "shipped"
 
 # Server-only secrets live on the box and are NEVER in the shipped bundle.
@@ -74,8 +109,13 @@ ok "shipped"
 
 # ── Restart ──────────────────────────────────────────────────────────────────
 log "Restarting"
-"${SSH[@]}" "cd ${REMOTE} && (pm2 restart kryon-web --update-env 2>/dev/null || pm2 start server.js --name kryon-web --update-env) && pm2 save" >/dev/null
-ok "kryon-web restarted"
+# systemd, not pm2 — pm2's daemon costs another ~40MB on a 945MB box, so the
+# unit runs server.js directly. `restorecon` because rsync writes files with the
+# default label and SELinux will not let init_t execute an unlabelled bundle.
+"${SSH[@]}" "sudo restorecon -R ${REMOTE} 2>/dev/null; sudo systemctl restart kryon-web"
+"${SSH[@]}" "systemctl is-active kryon-web" | grep -qx active \
+  || die "kryon-web did not come back up — check 'journalctl -u kryon-web -n 50' on the box"
+ok "kryon-web restarted (systemd)"
 
 sleep 6
 for net in mainnet testnet; do

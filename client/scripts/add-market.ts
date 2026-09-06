@@ -66,10 +66,17 @@ const MAX_ORACLE_AGE_SECS = BigInt(process.env.MARKET_MAX_ORACLE_AGE_SECS ?? "12
 const MAX_ORACLE_CONFIDENCE_BPS = Number(process.env.MARKET_MAX_ORACLE_CONFIDENCE_BPS ?? "1000");
 const MAX_EXECUTION_DEVIATION_BPS = Number(process.env.MARKET_MAX_EXECUTION_DEVIATION_BPS ?? "1000");
 
-const STATE_PATH = path.resolve(
-  __dirname,
-  `../../kryon-protocol/infra/deploy/${NETWORK.name}-markets.json`
-);
+// Overridable, because the default is one file per NETWORK — not per
+// deployment. Registering markets against a second deployment on the same
+// network reads the first one's checkpoints, decides every market is already
+// registered, and exits reporting success having done nothing. Same failure the
+// deploy scripts had with their own state and secrets paths.
+const STATE_PATH = process.env.MARKETS_STATE_PATH
+  ? path.resolve(process.env.MARKETS_STATE_PATH)
+  : path.resolve(
+      __dirname,
+      `../../kryon-protocol/infra/deploy/${NETWORK.name}-markets.json`
+    );
 
 // ── args ──────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
