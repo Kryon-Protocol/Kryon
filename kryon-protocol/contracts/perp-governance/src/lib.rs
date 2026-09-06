@@ -66,6 +66,19 @@ impl PerpGovernanceContract {
         Ok(())
     }
 
+    /// Replace this contract's WASM in place. Storage, the contract address and
+    /// every wired peer address survive, so an upgrade needs no migration.
+    ///
+    /// Admin-gated, and that is the whole security model: in production the
+    /// admin MUST be the governance timelock, which makes an upgrade inherit
+    /// its delay and cancellation window. While a plain keypair holds admin,
+    /// this function turns a key compromise into total protocol takeover.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
     pub fn nominate_admin(env: Env, next_admin: Address) -> Result<(), CoreError> {
         require_admin(&env)?;
         env.storage()

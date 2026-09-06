@@ -7,7 +7,8 @@ use protocol_core::{
 };
 use risk_engine::{account_health, validate_withdrawal, AccountHealth};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, vec, Address, Env, IntoVal, Map, Symbol, Vec,
+    contract, contractevent, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
+    Map, Symbol, Vec,
 };
 
 /// Instance TTL keepalive bounds (ledgers, ~5s each).
@@ -43,6 +44,21 @@ pub enum DataKey {
     DepositCap(Address),
     /// Running sum of deposits minus withdrawals per asset (backs the cap).
     TotalDeposited(Address),
+    /// Keeper permitted to settle settlement-asset debits outside liquidation.
+    Operator,
+}
+
+/// Emitted whenever liquidation reassigns collateral to cover a settlement
+/// deficit. `uncovered_value` is the shortfall insurance must absorb.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollateralSeized {
+    #[topic]
+    pub user: Address,
+    #[topic]
+    pub deficit_asset: Address,
+    pub credited: i128,
+    pub uncovered_value: i128,
 }
 
 #[contract]
@@ -69,6 +85,19 @@ impl PerpVaultContract {
     pub fn set_oracle(env: Env, oracle: Address) -> Result<(), CoreError> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Oracle, &oracle);
+        Ok(())
+    }
+
+    /// Replace this contract's WASM in place. Storage, the contract address and
+    /// every wired peer address survive, so an upgrade needs no migration.
+    ///
+    /// Admin-gated, and that is the whole security model: in production the
+    /// admin MUST be the governance timelock, which makes an upgrade inherit
+    /// its delay and cancellation window. While a plain keypair holds admin,
+    /// this function turns a key compromise into total protocol takeover.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
@@ -183,6 +212,82 @@ impl PerpVaultContract {
         Ok(covered)
     }
 
+    /// Cover a negative balance in `deficit_asset` by seizing the account's other
+    /// collateral, valued at oracle price *after* that asset's haircut.
+    ///
+    /// This is the step that makes non-settlement collateral actually liable for
+    /// losses. Without it, a trader who posts only non-settlement collateral drives
+    /// their settlement balance negative, and `absorb_bad_debt` socialises a loss to
+    /// the insurance fund while their real collateral sits untouched in the vault.
+    /// Liquidation MUST call this before `absorb_bad_debt` so insurance only ever
+    /// covers a genuinely uncollateralised shortfall.
+    ///
+    /// Seizure order is deterministic: lowest haircut first. The haircut is the
+    /// protocol's standing estimate of how hard an asset is to convert, so taking
+    /// the most liquid collateral first maximises the chance the seizure can be
+    /// unwound into the settlement asset near the value credited here.
+    ///
+    /// Tokens do not move: the vault already custodies them. This reassigns the
+    /// user's internal claim, leaving the vault holding surplus `asset` against a
+    /// `deficit_asset` credit — the treasury leg converts that surplus separately.
+    ///
+    /// Returns the amount credited to `deficit_asset` (never more than the
+    /// deficit, never more than the collateral actually taken). Idempotent for
+    /// non-negative balances. Only the liquidation contract may call.
+    pub fn seize_for_deficit(
+        env: Env,
+        user: Address,
+        deficit_asset: Address,
+    ) -> Result<i128, CoreError> {
+        require_liquidation(&env)?;
+        seize_for_deficit_inner(&env, user, deficit_asset)
+    }
+
+    /// Settle a settlement-asset debit outside liquidation.
+    ///
+    /// Losses debit the settlement asset on every fill and funding application,
+    /// so an account margined in another collateral accrues a negative
+    /// settlement balance between liquidations. That balance is real reserves
+    /// the vault has already paid to the winning side, so leaving it
+    /// outstanding until the account happens to become liquidatable understates
+    /// what the vault owes in the settlement asset.
+    ///
+    /// Callable by the operator (keeper) or by the account owner. Deliberately
+    /// NOT permissionless: seizure converts collateral at a haircut, so an open
+    /// entry point would let anyone force that conversion on a trader who would
+    /// rather clear the debit by depositing the settlement asset.
+    pub fn settle_deficit(
+        env: Env,
+        caller: Address,
+        user: Address,
+        asset: Address,
+    ) -> Result<i128, CoreError> {
+        caller.require_auth();
+        if caller != user {
+            let operator: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Operator)
+                .ok_or(CoreError::InvalidConfig)?;
+            if caller != operator {
+                return Err(CoreError::Unauthorized);
+            }
+        }
+        require_not_paused(&env)?;
+        seize_for_deficit_inner(&env, user, asset)
+    }
+
+    /// Keeper permitted to call `settle_deficit` for any account.
+    pub fn set_operator(env: Env, operator: Address) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Operator, &operator);
+        Ok(())
+    }
+
+    pub fn operator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Operator)
+    }
+
     pub fn set_collateral(
         env: Env,
         asset: Address,
@@ -204,6 +309,13 @@ impl PerpVaultContract {
             .persistent()
             .set(&DataKey::Collateral(asset), &config);
         Ok(())
+    }
+
+    /// The listed configuration for a collateral asset, or None if it was never
+    /// listed. Clients read this to discover which assets the vault actually
+    /// accepts, rather than hardcoding a list that can drift from the chain.
+    pub fn collateral(env: Env, asset: Address) -> Option<CollateralConfig> {
+        env.storage().persistent().get(&DataKey::Collateral(asset))
     }
 
     pub fn set_market_config(env: Env, config: MarketConfig) -> Result<(), CoreError> {
@@ -608,6 +720,137 @@ fn record_user_asset(env: &Env, user: &Address, asset: &Address) {
     }
     assets.push_back(asset.clone());
     env.storage().persistent().set(&key, &assets);
+}
+
+fn seize_for_deficit_inner(
+    env: &Env,
+    user: Address,
+    deficit_asset: Address,
+) -> Result<i128, CoreError> {
+    let balance = balance_of(env.clone(), user.clone(), deficit_asset.clone());
+    if balance >= 0 {
+        return Ok(0);
+    }
+    let deficit_amount = checked_sub(0, balance)?;
+    let deficit_price = collateral_price(env, &deficit_asset)?.price;
+    if deficit_price <= 0 {
+        return Err(CoreError::InvalidPrice);
+    }
+    // Oracle-denominated value still owed to the vault.
+    let mut remaining_value = protocol_core::mul_precision(deficit_amount, deficit_price)?;
+
+    let oracle = oracle_address(env)?;
+    let mut credited: i128 = 0;
+
+    for asset in seizure_order(env, &user, &deficit_asset).iter() {
+        if remaining_value <= 0 {
+            break;
+        }
+        let amount = balance_of(env.clone(), user.clone(), asset.clone());
+        if amount <= 0 {
+            continue;
+        }
+        let config = match load_collateral(env, &asset) {
+            Ok(config) => config,
+            Err(_) => continue,
+        };
+        let price = oracle_get_price(env, &oracle, &config.oracle_asset, None)?.price;
+        let gross_value = protocol_core::mul_precision(amount, price)?;
+        let net_value =
+            protocol_core::collateral_value_after_haircut(gross_value, config.haircut_bps)?;
+        // A fully haircut asset contributes no equity, so it can settle no debt.
+        if net_value <= 0 {
+            continue;
+        }
+
+        let seize_amount = if net_value <= remaining_value {
+            amount
+        } else {
+            // Partial take, rounded down: seizing less than the exact share is
+            // the protocol-safe direction (the residue stays with the user).
+            protocol_core::mul_div(amount, remaining_value, net_value)?
+        };
+        if seize_amount <= 0 {
+            continue;
+        }
+
+        // Re-derive the value taken from the *rounded* amount so the credit can
+        // never exceed the collateral actually seized.
+        let seized_value = protocol_core::collateral_value_after_haircut(
+            protocol_core::mul_precision(seize_amount, price)?,
+            config.haircut_bps,
+        )?;
+        let credit = protocol_core::div_precision(seized_value, deficit_price)?;
+        if credit <= 0 {
+            continue;
+        }
+
+        decrease_balance(env, &user, &asset, seize_amount)?;
+        credited = checked_add(credited, credit)?;
+        remaining_value = checked_sub(remaining_value, seized_value)?;
+    }
+
+    if credited > 0 {
+        increase_balance(env, &user, &deficit_asset, credited)?;
+    }
+    CollateralSeized {
+        user,
+        deficit_asset,
+        credited,
+        // What the account's own collateral could not cover. This is the
+        // amount `absorb_bad_debt` is about to draw from insurance, so it is
+        // the number to alert on.
+        uncovered_value: remaining_value.max(0),
+    }
+    .publish(env);
+    Ok(credited)
+}
+
+/// Collateral assets scanned per seizure. `UserAssets` only ever grows with
+/// assets the admin has listed, so this is a generous ceiling — it exists so a
+/// liquidation can never be priced out of the ledger by a long asset list.
+const MAX_SEIZE_SCAN: u32 = 16;
+
+/// The account's seizable collateral, ordered by ascending haircut (most liquid
+/// first), excluding the deficit asset itself and any de-listed asset.
+///
+/// Inactive collateral is skipped deliberately: `account_snapshot_all_assets`
+/// excludes it from equity, so seizing it would create settlement value the
+/// health calculation never counted.
+fn seizure_order(env: &Env, user: &Address, deficit_asset: &Address) -> Vec<Address> {
+    let assets: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::UserAssets(user.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut ordered: Vec<Address> = Vec::new(env);
+    let mut haircuts: Vec<u32> = Vec::new(env);
+
+    for asset in assets.iter().take(MAX_SEIZE_SCAN as usize) {
+        if asset == *deficit_asset {
+            continue;
+        }
+        let config = match load_collateral(env, &asset) {
+            Ok(config) => config,
+            Err(_) => continue,
+        };
+        if !config.active {
+            continue;
+        }
+        // Insertion sort, stable on ties — keeps the order deterministic across
+        // nodes for identical state.
+        let mut at = ordered.len();
+        for i in 0..ordered.len() {
+            if haircuts.get(i).unwrap_or(0) > config.haircut_bps {
+                at = i;
+                break;
+            }
+        }
+        ordered.insert(at, asset);
+        haircuts.insert(at, config.haircut_bps);
+    }
+    ordered
 }
 
 fn account_snapshot_all_assets(
@@ -1050,5 +1293,263 @@ mod tests {
         // BTC value:   2 * PRECISION * 10 * PRECISION / PRECISION = 20 * PRECISION
         // Total equity (no positions) = 120 * PRECISION
         assert_eq!(health.equity, 120 * PRECISION);
+    }
+
+    // --- seize_for_deficit: non-settlement collateral must pay for losses ---
+
+    fn setup_seize(
+        env: &Env,
+        btc_haircut_bps: u32,
+    ) -> (
+        Address,
+        Address,
+        Address,
+        Address,
+        PerpVaultContractClient<'_>,
+    ) {
+        env.mock_all_auths();
+
+        let admin = Address::generate(env);
+        let user = Address::generate(env);
+        let engine = Address::generate(env);
+        let liquidation = Address::generate(env);
+        let publisher = Address::generate(env);
+
+        let usdc = env
+            .register_stellar_asset_contract_v2(Address::generate(env))
+            .address();
+        let btc = env
+            .register_stellar_asset_contract_v2(Address::generate(env))
+            .address();
+        token::StellarAssetClient::new(env, &btc).mint(&user, &(10 * PRECISION));
+
+        let oracle_id = env.register(OracleAdapterContract, ());
+        let oracle = OracleAdapterContractClient::new(env, &oracle_id);
+        oracle.initialize(&admin);
+        for asset in [Symbol::new(env, "USDC"), Symbol::new(env, "BTC")] {
+            oracle.set_feed(
+                &asset,
+                &publisher,
+                &OracleSource::Reflector,
+                &OracleGuard {
+                    max_age_secs: 60,
+                    max_confidence_bps: 100,
+                },
+                &true,
+            );
+        }
+        oracle.write_price(
+            &Symbol::new(env, "USDC"),
+            &publisher,
+            &PRECISION,
+            &(PRECISION / 100),
+            &env.ledger().timestamp(),
+        );
+        oracle.write_price(
+            &Symbol::new(env, "BTC"),
+            &publisher,
+            &(10 * PRECISION),
+            &(PRECISION / 100),
+            &env.ledger().timestamp(),
+        );
+
+        let vault_id = env.register(PerpVaultContract, ());
+        let vault = PerpVaultContractClient::new(env, &vault_id);
+        vault.initialize(&admin, &oracle_id, &engine);
+        vault.set_liquidation(&liquidation);
+        vault.set_collateral(&usdc, &Symbol::new(env, "USDC"), &0, &true);
+        vault.set_collateral(&btc, &Symbol::new(env, "BTC"), &btc_haircut_bps, &true);
+
+        (user, usdc, btc, liquidation, vault)
+    }
+
+    #[test]
+    fn seize_for_deficit_covers_settlement_debit_from_other_collateral() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+
+        // Trader is margined entirely in BTC: 2 BTC @ $10 = $20 of collateral.
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        // A $10 loss debits the settlement asset they never deposited.
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+        assert_eq!(vault.balance_of(&user, &usdc), -10 * PRECISION);
+
+        let credited = vault.seize_for_deficit(&user, &usdc);
+
+        // $10 of debt at $10/BTC with no haircut = exactly 1 BTC seized.
+        assert_eq!(credited, 10 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+        assert_eq!(vault.balance_of(&user, &btc), PRECISION);
+    }
+
+    #[test]
+    fn seize_for_deficit_prices_collateral_after_haircut() {
+        let env = Env::default();
+        // 50% haircut: BTC is worth half its oracle price as margin, so covering
+        // the same debt must consume twice as many units.
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 5_000);
+
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+
+        let credited = vault.seize_for_deficit(&user, &usdc);
+
+        // 2 BTC * $10 * (1 - 0.5) = $10 of usable value — all of it consumed.
+        assert_eq!(credited, 10 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+        assert_eq!(vault.balance_of(&user, &btc), 0);
+    }
+
+    #[test]
+    fn seize_for_deficit_leaves_uncovered_remainder_for_insurance() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+
+        // Only $10 of collateral against a $25 loss — genuinely undercollateralised.
+        vault.deposit(&user, &btc, &PRECISION);
+        vault.apply_pnl(&user, &usdc, &(-25 * PRECISION));
+
+        let credited = vault.seize_for_deficit(&user, &usdc);
+
+        assert_eq!(credited, 10 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &btc), 0);
+        // The $15 that collateral could not cover stays negative, so
+        // absorb_bad_debt still draws exactly that much from insurance.
+        assert_eq!(vault.balance_of(&user, &usdc), -15 * PRECISION);
+    }
+
+    #[test]
+    fn seize_for_deficit_never_takes_more_than_the_deficit() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+
+        vault.deposit(&user, &btc, &(5 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-PRECISION));
+
+        let credited = vault.seize_for_deficit(&user, &usdc);
+
+        assert_eq!(credited, PRECISION);
+        // Balance lands exactly at zero, never positive — seizure settles debt,
+        // it does not fund the account.
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+        // $1 of debt at $10/BTC = 0.1 BTC taken out of 5.
+        assert_eq!(vault.balance_of(&user, &btc), 49 * PRECISION / 10);
+    }
+
+    #[test]
+    fn seize_for_deficit_is_a_noop_for_solvent_accounts() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(5 * PRECISION));
+
+        assert_eq!(vault.seize_for_deficit(&user, &usdc), 0);
+        assert_eq!(vault.balance_of(&user, &btc), 2 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), 5 * PRECISION);
+    }
+
+    #[test]
+    fn seize_for_deficit_takes_lowest_haircut_collateral_first() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 5_000);
+
+        // A second stable, listed at a 0% haircut — deposited AFTER btc, so
+        // insertion order alone would pick btc first.
+        let stbl = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        token::StellarAssetClient::new(&env, &stbl).mint(&user, &(100 * PRECISION));
+        vault.set_collateral(&stbl, &Symbol::new(&env, "USDC"), &0, &true);
+
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.deposit(&user, &stbl, &(50 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+
+        vault.seize_for_deficit(&user, &usdc);
+
+        // The liquid, un-haircut collateral pays; the volatile position is untouched.
+        assert_eq!(vault.balance_of(&user, &stbl), 40 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &btc), 2 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+    }
+
+    #[test]
+    fn seize_for_deficit_skips_delisted_collateral() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+        // De-listing drops the asset out of equity, so it must not back debt
+        // either — otherwise seizure would settle value health never counted.
+        vault.set_collateral(&btc, &Symbol::new(&env, "BTC"), &0, &false);
+
+        assert_eq!(vault.seize_for_deficit(&user, &usdc), 0);
+        assert_eq!(vault.balance_of(&user, &btc), 2 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), -10 * PRECISION);
+    }
+
+    #[test]
+    fn upgrade_rejects_callers_without_admin_auth() {
+        let env = Env::default();
+        let (_user, _usdc, _btc, _liq, vault) = setup_seize(&env, 0);
+        // Drop the blanket auth mock: with no authorisation attached, the admin
+        // gate must reject the upgrade. This is the only thing standing between
+        // a leaked key and arbitrary code in the vault, so it gets a test.
+        env.set_auths(&[]);
+        let result = vault.try_upgrade(&BytesN::from_array(&env, &[0u8; 32]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn settle_deficit_lets_the_owner_clear_their_own_debit() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+
+        // No liquidation involved: the trader settles the debit themselves.
+        assert_eq!(vault.settle_deficit(&user, &user, &usdc), 10 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+        assert_eq!(vault.balance_of(&user, &btc), PRECISION);
+    }
+
+    #[test]
+    fn settle_deficit_lets_the_operator_clear_a_debit() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+        let operator = Address::generate(&env);
+        vault.set_operator(&operator);
+        assert_eq!(vault.operator(), Some(operator.clone()));
+
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+
+        assert_eq!(
+            vault.settle_deficit(&operator, &user, &usdc),
+            10 * PRECISION
+        );
+        assert_eq!(vault.balance_of(&user, &usdc), 0);
+    }
+
+    #[test]
+    fn settle_deficit_rejects_a_stranger() {
+        let env = Env::default();
+        let (user, usdc, btc, _liq, vault) = setup_seize(&env, 0);
+        vault.set_operator(&Address::generate(&env));
+        vault.deposit(&user, &btc, &(2 * PRECISION));
+        vault.apply_pnl(&user, &usdc, &(-10 * PRECISION));
+
+        // Seizure converts collateral at a haircut, so a third party must not be
+        // able to force it on someone who would rather deposit to clear the debit.
+        let stranger = Address::generate(&env);
+        let result = vault.try_settle_deficit(&stranger, &user, &usdc);
+        assert!(match result {
+            Ok(inner) => inner.is_err(),
+            Err(_) => true,
+        });
+        assert_eq!(vault.balance_of(&user, &btc), 2 * PRECISION);
+        assert_eq!(vault.balance_of(&user, &usdc), -10 * PRECISION);
     }
 }

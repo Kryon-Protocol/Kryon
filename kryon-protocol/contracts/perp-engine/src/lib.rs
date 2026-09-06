@@ -6,7 +6,9 @@ use protocol_core::{
     notional, CoreError, MarginMode, MarketConfig, OracleGuard, OracleSnapshot, Position,
 };
 use risk_engine::{update_from_imbalance, AccountHealth, FundingConfig, FundingState};
-use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
+};
 
 /// I2: per-user open-position cap. Must stay well below the risk engine's
 /// 64-entry account_health buffer — hitting that buffer makes health
@@ -111,6 +113,19 @@ impl PerpEngineContract {
         Ok(())
     }
 
+    /// Replace this contract's WASM in place. Storage, the contract address and
+    /// every wired peer address survive, so an upgrade needs no migration.
+    ///
+    /// Admin-gated, and that is the whole security model: in production the
+    /// admin MUST be the governance timelock, which makes an upgrade inherit
+    /// its delay and cancellation window. While a plain keypair holds admin,
+    /// this function turns a key compromise into total protocol takeover.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
     pub fn nominate_admin(env: Env, next_admin: Address) -> Result<(), CoreError> {
         require_admin(&env)?;
         env.storage()
@@ -194,6 +209,22 @@ impl PerpEngineContract {
         env.storage()
             .instance()
             .set(&DataKey::FeeRecipient, &recipient);
+        Ok(())
+    }
+
+    /// Re-point the engine at a different vault.
+    ///
+    /// Without this the vault address was fixed at `initialize`, so replacing
+    /// the vault forced replacing the engine too — and with it every position,
+    /// order-gateway wiring and address baked into clients. Liquidation and
+    /// insurance already had `set_vault`; the engine not having one is what made
+    /// a vault swap cascade.
+    ///
+    /// Changing this mid-flight points the engine at a vault holding none of the
+    /// existing balances, so it is a migration step, not a runtime knob.
+    pub fn set_vault(env: Env, vault: Address) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Vault, &vault);
         Ok(())
     }
 
