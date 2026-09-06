@@ -54,6 +54,22 @@ const ALERT_REMINDER_MS = 60 * 60 * 1000; // hourly reminder while a check stays
 // idle protocol. Alert on the balance, not on the outage it eventually causes.
 const OPERATOR_XLM_WARN = Number(process.env.OPERATOR_XLM_WARN ?? "25");
 
+// Funding accrues only when someone calls update_funding, and the contract
+// charges at most one hour per call. A gap longer than that is silently
+// under-charged funding — the market drifts from its index and nothing says so.
+//
+// This check exists because nothing was watching: funding sat at zero for the
+// entire life of the protocol (audit KRY-Q1/Q2) and no alert could have fired,
+// because no alert looked. Silence from a funding keeper is indistinguishable
+// from a market with no premium unless you read last_update.
+const FUNDING_STALE_ALERT_SECS = Number(process.env.FUNDING_STALE_ALERT_SECS ?? "3600");
+
+// Liquidation closes a distressed position with no counterparty, so the
+// insurance fund is the protocol's implicit other side (audit KRY-Q4). The
+// on-chain OI cap bounds that exposure; this alerts while it is merely thinning,
+// rather than when an open is first refused.
+const INSURANCE_COVERAGE_WARN_BPS = Number(process.env.INSURANCE_COVERAGE_WARN_BPS ?? "2000");
+
 const PRICE_PRECISION = 1e18;
 
 // Synthetic sim account for read-only oracle queries
@@ -249,6 +265,7 @@ function operators(): Operator[] {
     { name: "matcher", address: operatorAddress("MATCHER_OPERATOR_SECRET", "MATCHER_OPERATOR_PUBKEY") },
     { name: "liquidator", address: operatorAddress("LIQUIDATOR_SECRET") },
     { name: "ttl-keeper", address: operatorAddress("TTL_KEEPER_SECRET") },
+    { name: "funding-keeper", address: operatorAddress("FUNDING_KEEPER_SECRET") },
   ];
   return candidates.filter((o): o is Operator => o.address !== null);
 }
@@ -282,6 +299,112 @@ async function checkOperatorBalances(): Promise<string> {
 
   if (problems.length) throw new Error(problems.join("; "));
   return `${healthy.sort().join(", ")} XLM`;
+}
+
+/** Read one value from a contract via simulation, or null if the call fails. */
+async function simRead(
+  server: sorobanRpc.Server,
+  contractId: string,
+  method: string,
+  args: xdr.ScVal[]
+): Promise<unknown | null> {
+  const tx = new TransactionBuilder(getSimAccount(), {
+    fee: "500000",
+    networkPassphrase: NETWORK.passphrase,
+  })
+    .addOperation(new Contract(contractId).call(method, ...args))
+    .setTimeout(30)
+    .build();
+  const sim = await server.simulateTransaction(tx);
+  if (sorobanRpc.Api.isSimulationError(sim)) return null;
+  const retval = (sim as sorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!retval) return null;
+  try {
+    return scValToNative(retval);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Funding must actually be accruing on every market.
+ *
+ * Reads `funding_state(market_id).last_update` and alerts when it falls further
+ * behind than the contract's own one-hour accrual cap. A market that has never
+ * had funding configured reports `last_update = 0`, which is called out
+ * separately: that is a deployment gap, not a keeper outage.
+ */
+async function checkFundingFreshness(): Promise<string> {
+  const server = new sorobanRpc.Server(NETWORK.rpcUrl);
+  const now = Math.floor(Date.now() / 1000);
+  const results: string[] = [];
+  const problems: string[] = [];
+
+  for (const market of Object.values(ACTIVE_MARKETS)) {
+    const state = (await simRead(server, CONTRACTS.engine, "funding_state", [
+      nativeToScVal(market.marketId, { type: "u32" }),
+    ])) as Record<string, unknown> | null;
+
+    if (!state) {
+      problems.push(`${market.symbol} funding_state unreadable`);
+      continue;
+    }
+    const lastUpdate = Number(state["last_update"] ?? 0);
+    if (lastUpdate === 0) {
+      problems.push(`${market.symbol} funding never initialised`);
+      continue;
+    }
+    const age = now - lastUpdate;
+    if (age > FUNDING_STALE_ALERT_SECS) {
+      problems.push(`${market.symbol} funding ${age}s stale (max ${FUNDING_STALE_ALERT_SECS}s)`);
+      continue;
+    }
+    results.push(`${market.symbol}=${age}s`);
+  }
+
+  if (problems.length) throw new Error(problems.join("; "));
+  return results.sort().join(", ");
+}
+
+/**
+ * How well the insurance fund covers each market's open interest.
+ *
+ * `insurance_coverage_bps` returns i128::MAX for a market with no open
+ * interest — infinitely covered rather than a divide-by-zero — so that case is
+ * reported as idle rather than as perfect health.
+ */
+async function checkInsuranceCoverage(): Promise<string> {
+  const server = new sorobanRpc.Server(NETWORK.rpcUrl);
+  const results: string[] = [];
+  const problems: string[] = [];
+  const UNBOUNDED = (1n << 127n) - 1n;
+
+  for (const market of Object.values(ACTIVE_MARKETS)) {
+    const raw = await simRead(server, CONTRACTS.engine, "insurance_coverage_bps", [
+      nativeToScVal(market.marketId, { type: "u32" }),
+    ]);
+    if (raw === null || raw === undefined) {
+      // Pre-upgrade engines have no such entrypoint. Not a protocol fault.
+      results.push(`${market.symbol}=n/a`);
+      continue;
+    }
+    const bps = BigInt(raw as string | number | bigint);
+    if (bps >= UNBOUNDED) {
+      results.push(`${market.symbol}=idle`);
+      continue;
+    }
+    if (bps < BigInt(INSURANCE_COVERAGE_WARN_BPS)) {
+      problems.push(
+        `${market.symbol} insurance covers ${Number(bps) / 100}% of open interest ` +
+          `(< ${INSURANCE_COVERAGE_WARN_BPS / 100}%)`
+      );
+      continue;
+    }
+    results.push(`${market.symbol}=${Number(bps) / 100}%`);
+  }
+
+  if (problems.length) throw new Error(problems.join("; "));
+  return results.sort().join(", ");
 }
 
 // ── Alerting ──────────────────────────────────────────────────────────────────
@@ -347,6 +470,8 @@ async function runChecks() {
     timed("app-health",       checkAppHealth),
     timed("websocket",        checkWebSocket),
     timed("operator-funds",   checkOperatorBalances),
+    timed("funding-accrual",  checkFundingFreshness),
+    timed("insurance-cover",  checkInsuranceCoverage),
   ]);
 
   let allOk = true;
