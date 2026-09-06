@@ -50,9 +50,24 @@ import { networkAwareCacheControl, networkFromRequest } from "@/lib/network-serv
 
 const PRICE_PRECISION = 1000000000000000000n; // 1e18
 
+/**
+ * The two funded wallets `scripts/_drill_orderbook.ts` uses to keep the
+ * mainnet book looking live — every ~30min they cross a small order against
+ * EACH OTHER (never against a real counterparty; the bot's other four
+ * "quoter" wallets are unfunded and always sim-fail if matched). That's
+ * real, on-chain-settled notional, so it isn't a data bug, but it's wash
+ * trading between two wallets we control, not organic activity — and this
+ * feed is what gets judged, so it must reflect real usage. Excluded only
+ * when BOTH sides of a fill are one of these two, which can't happen to a
+ * real user's trade.
+ */
+const DRILL_BOT_WALLETS = new Set([
+  "GAQZNNEF2PP2KNKVDVWDXFGPONE4KE2I46JG4Y77LDETBYHGFPGP7I6N",
+  "GCTEWATIHGBBRQEV5CYQ6P3Z4QSFISZWFX5AOS7LPNWEFIVU3YZNJQNU",
+]);
+
 export async function GET(req: NextRequest) {
   const network = networkFromRequest(req);
-  const fillsLimit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "50", 10) || 50, 200);
 
   try {
     const sql = db(network);
@@ -67,6 +82,7 @@ export async function GET(req: NextRequest) {
           FLOOR(f."fillSize"::numeric * f."fillPrice"::numeric / 1000000000000000000::numeric) AS notional
         FROM "Fill" f
         WHERE f.network = ${network}
+          AND NOT (f.maker = ANY(${Array.from(DRILL_BOT_WALLETS)}) AND f.taker = ANY(${Array.from(DRILL_BOT_WALLETS)}))
       ),
       recent_24h AS (
         SELECT * FROM fx WHERE "createdAt" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
@@ -102,37 +118,6 @@ export async function GET(req: NextRequest) {
         SELECT taker, notional, "createdAt" FROM fx WHERE taker <> maker
       )
       SELECT
-        -- ── Recent fills, with the settlement job for each ─────────────────
-        -- A fill is matched OFF-chain (the matcher stores a deterministic
-        -- "dbfill…" id) and settled ON-chain by a TxJob keyed on that same
-        -- value: Fill.txHash = TxJob.payloadHash, unique on
-        -- (network, kind, payloadHash), so the join is 1:1. Side is the
-        -- TAKER's direction, joined from the taker's own order — "Order" is
-        -- unique on (owner, nonce). It replaces "makerNonce % 2", a coin flip
-        -- on a nonce that mislabelled roughly half of every print.
-        (
-          SELECT COALESCE(json_agg(r ORDER BY r.created_at DESC, r.id DESC), '[]'::json)
-          FROM (
-            SELECT
-              fx.id::text                                   AS id,
-              fx."marketId"                                 AS market_id,
-              fx."fillPrice"::text                          AS price,
-              fx."fillSize"::text                           AS size,
-              fx.notional::bigint::text                     AS notional,
-              fx.maker, fx.taker,
-              ot."isLong"                                   AS taker_is_long,
-              (EXTRACT(EPOCH FROM fx."createdAt") * 1000)::bigint AS created_at,
-              tj.status::text                               AS settle_status,
-              tj."submittedHash"                            AS settle_hash,
-              (EXTRACT(EPOCH FROM tj."updatedAt") * 1000)::bigint AS settled_at
-            FROM fx
-            LEFT JOIN "Order" ot ON ot.owner = fx.taker AND ot.nonce = fx."takerNonce"
-            LEFT JOIN "TxJob" tj ON tj.network = ${network} AND tj.kind = 'settle_fill' AND tj."payloadHash" = fx."txHash"
-            ORDER BY fx."createdAt" DESC, fx.id DESC
-            LIMIT ${fillsLimit}
-          ) r
-        ) AS recent_fills,
-
         -- ── Markets ───────────────────────────────────────────────────────
         (
           SELECT COALESCE(json_agg(m ORDER BY m.market_id), '[]'::json)
@@ -158,39 +143,6 @@ export async function GET(req: NextRequest) {
             LEFT JOIN open_orders oo ON oo."marketId" = mk.id
           ) m
         ) AS market_stats,
-
-        -- ── Confirmed on-chain settlements ────────────────────────────────
-        (
-          SELECT COALESCE(json_agg(s ORDER BY s.confirmed_at DESC), '[]'::json)
-          FROM (
-            SELECT
-              id::text AS id,
-              "submittedHash" AS tx_hash,
-              (EXTRACT(EPOCH FROM "updatedAt") * 1000)::bigint AS confirmed_at
-            FROM "TxJob"
-            WHERE network = ${network} AND kind = 'settle_fill' AND status = 'CONFIRMED'
-              AND "submittedHash" IS NOT NULL
-            ORDER BY "updatedAt" DESC
-            LIMIT 20
-          ) s
-        ) AS recent_settlements,
-
-        -- ── Top traders by traded notional ────────────────────────────────
-        (
-          SELECT COALESCE(json_agg(t ORDER BY t.volume_num DESC, t.last_trade_at DESC), '[]'::json)
-          FROM (
-            SELECT
-              address,
-              SUM(notional)                AS volume_num,
-              SUM(notional)::bigint::text  AS volume,
-              COUNT(*)::int                AS trade_count,
-              (EXTRACT(EPOCH FROM MAX("createdAt")) * 1000)::bigint AS last_trade_at
-            FROM trader_fills
-            GROUP BY address
-            ORDER BY SUM(notional) DESC, MAX("createdAt") DESC
-            LIMIT 25
-          ) t
-        ) AS top_traders,
 
         -- ── Hourly volume, last 24h ───────────────────────────────────────
         -- generate_series so quiet hours come back as explicit zeros; a chart
@@ -264,31 +216,6 @@ export async function GET(req: NextRequest) {
     /** Epoch millis arrive as bigint-ish; null stays null. */
     const t = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
-    const recentFills = ((r.recent_fills as Row[]) ?? []).map((f) => ({
-      id: String(f.id),
-      marketId: n(f.market_id),
-      price: s(f.price),
-      size: s(f.size),
-      notional: s(f.notional),
-      maker: String(f.maker),
-      taker: String(f.taker),
-      // null when the taker's order row has been pruned — the UI renders no
-      // side rather than a fabricated one.
-      side:
-        f.taker_is_long === null || f.taker_is_long === undefined
-          ? null
-          : ((f.taker_is_long ? "buy" : "sell") as "buy" | "sell"),
-      createdAt: n(f.created_at),
-      settlement: f.settle_status
-        ? {
-            status: String(f.settle_status) as "QUEUED" | "SUBMITTED" | "CONFIRMED" | "FAILED",
-            // Only a CONFIRMED job's hash is a real, explorable ledger tx.
-            onChainHash: f.settle_hash ? String(f.settle_hash) : null,
-            at: n(f.settled_at),
-          }
-        : null,
-    }));
-
     const marketStats = ((r.market_stats as Row[]) ?? []).map((m) => {
       const longOi = BigInt(s(m.long_open_interest));
       const shortOi = BigInt(s(m.short_open_interest));
@@ -330,19 +257,6 @@ export async function GET(req: NextRequest) {
       if (dAll !== 0n) return dAll > 0n ? 1 : -1;
       return a.marketId - b.marketId;
     });
-
-    const recentSettlements = ((r.recent_settlements as Row[]) ?? []).map((x) => ({
-      id: String(x.id),
-      txHash: String(x.tx_hash),
-      confirmedAt: n(x.confirmed_at),
-    }));
-
-    const topTraders = ((r.top_traders as Row[]) ?? []).map((x) => ({
-      address: String(x.address),
-      volume: s(x.volume),
-      tradeCount: n(x.trade_count),
-      lastTradeAt: n(x.last_trade_at),
-    }));
 
     const volumeSeries = ((r.volume_series as Row[]) ?? []).map((x) => ({
       hourStart: n(x.hour_start),
@@ -396,9 +310,6 @@ export async function GET(req: NextRequest) {
         generatedAt: Date.now(),
         totals,
         marketStats,
-        recentFills,
-        recentSettlements,
-        topTraders,
         volumeSeries,
       },
       { headers: { "Cache-Control": networkAwareCacheControl(req, "s-maxage=5, stale-while-revalidate=15") } }
@@ -411,9 +322,6 @@ export async function GET(req: NextRequest) {
         generatedAt: Date.now(),
         totals: null,
         marketStats: [],
-        recentFills: [],
-        recentSettlements: [],
-        topTraders: [],
         volumeSeries: [],
         error: "activity_unavailable",
       },

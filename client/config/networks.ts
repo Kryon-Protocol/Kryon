@@ -164,6 +164,14 @@ const TESTNET_DEFAULTS = {
   passphrase: "Test SDF Network ; September 2015",
   horizonUrl: "https://horizon-testnet.stellar.org",
   // Redeployed 2026-09-06 as v3 (infra/deploy/testnet-deployment-v3.json).
+  //
+  // EVERY layer must name the same contract set: this file (browser + API), the
+  // Railway keeper env vars (NEXT_PUBLIC_CONTRACT_*), and any script. When the
+  // web tier briefly pointed at v2 while the keepers ran v3, deposits landed in
+  // a vault no matcher was watching, so orders rested unbacked, every fill
+  // failed its margin check and rolled back, and one settle job retried 356
+  // times. The oracle keeper only feeds the set it is configured for — the
+  // other set goes stale within ~10 minutes and settlement stops dead.
   // The v2 deployment's admin key was lost, so its vault could never be
   // reconfigured again — no new collateral, no new markets, no guardian, no
   // admin handover. v3 carries the multi-collateral work AND upgrade() on every
