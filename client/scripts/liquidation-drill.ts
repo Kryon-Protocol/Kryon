@@ -68,7 +68,13 @@ if (NETWORK.name === "mainnet") {
 }
 
 const FEE = "2000000";
-const PRECISION = 10n ** 18n;
+// Sizes, notionals and vault balances are 7-decimal (Stellar token scale);
+// oracle prices are 18-decimal. Dividing a size by the PRICE scale silently
+// renders every quantity as 0, which is how the first run of this drill
+// reported "LONG 0" against a real 800-XLM position.
+const AMOUNT = 10n ** 7n;
+const amt = (v: bigint) => Number(v) / Number(AMOUNT);
+const px = (v: bigint) => Number(v / 10n ** 12n) / 1e6;
 const MARKET = Object.values(ACTIVE_MARKETS)[0];
 
 if (!MARKET) {
@@ -179,13 +185,41 @@ async function positions(user: string): Promise<Position[]> {
   }));
 }
 
+/**
+ * Backdate `publish_time` so it can never sit ahead of the ledger clock.
+ *
+ * `OracleSnapshot::validate` rejects `publish_time > now` as StaleOracle, and
+ * `now` is the LEDGER timestamp, which trails wall-clock by up to a full ledger.
+ * Stamping with `Date.now()` therefore fails intermittently — whenever the
+ * transaction lands in a ledger that closed a second before the stamp. The
+ * oracle keeper backdates for exactly this reason; the drill must match it or
+ * it fails on a race that has nothing to do with liquidation.
+ */
+const PUBLISH_BACKDATE_SECS = 20;
+
 async function publishPrice(publisher: Keypair, price: bigint): Promise<void> {
   await send(publisher, CONTRACTS.oracleAdapter, "write_price", [
     nativeToScVal(MARKET.oracleSymbol, { type: "symbol" }),
     new Address(publisher.publicKey()).toScVal(),
     nativeToScVal(price, { type: "i128" }),
-    nativeToScVal(price / 1000n, { type: "i128" }),
-    nativeToScVal(Math.floor(Date.now() / 1000), { type: "u64" }),
+    nativeToScVal(price / 2000n, { type: "i128" }),
+    nativeToScVal(Math.floor(Date.now() / 1000) - PUBLISH_BACKDATE_SECS, { type: "u64" }),
+  ]);
+}
+
+/**
+ * Collateral is valued off its own feed, so it has to stay fresh while the
+ * drill walks the market price — otherwise every `account_health` read fails
+ * StaleOracle and the drill reports a liquidation failure that is really an
+ * oracle failure.
+ */
+async function refreshCollateralFeed(publisher: Keypair): Promise<void> {
+  await send(publisher, CONTRACTS.oracleAdapter, "write_price", [
+    nativeToScVal("USDC", { type: "symbol" }),
+    new Address(publisher.publicKey()).toScVal(),
+    nativeToScVal(10n ** 18n, { type: "i128" }),
+    nativeToScVal(10n ** 15n, { type: "i128" }),
+    nativeToScVal(Math.floor(Date.now() / 1000) - PUBLISH_BACKDATE_SECS, { type: "u64" }),
   ]);
 }
 
@@ -201,14 +235,33 @@ async function main(): Promise<void> {
   console.log(`  victim     ${victim.publicKey()}`);
   console.log(`  liquidator ${liquidator.publicKey()}`);
 
-  step("1. record the starting price");
-  const startPrice = BigInt(
-    ((await read(CONTRACTS.oracleAdapter, "get_price", [
-      nativeToScVal(MARKET.oracleSymbol, { type: "symbol" }),
-      xdr.ScVal.scvVoid(),
-    ])) as Record<string, unknown>).price as bigint
-  );
-  console.log(`   index = ${startPrice / PRECISION}`);
+  step("1. establish a baseline price");
+  // Read the last snapshot with a PERMISSIVE guard rather than None. With None
+  // the contract enforces the feed's own max_age and rejects a stale price
+  // inside the simulation, so a market whose keeper is down fails here — an
+  // oracle problem reported as a liquidation problem. The drill owns the oracle
+  // for its duration, so it reads whatever is stored and then republishes it
+  // fresh as its own starting point.
+  const permissiveGuard = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol("max_age_secs"),
+      val: nativeToScVal(BigInt("18446744073709551615"), { type: "u64" }),
+    }),
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol("max_confidence_bps"),
+      val: nativeToScVal(10000, { type: "u32" }),
+    }),
+  ]);
+  const snapshot = (await read(CONTRACTS.oracleAdapter, "get_price", [
+    nativeToScVal(MARKET.oracleSymbol, { type: "symbol" }),
+    permissiveGuard,
+  ])) as Record<string, unknown> | null;
+  assert(snapshot?.price, `no ${MARKET.oracleSymbol} snapshot exists — the feed has never been written`);
+  const startPrice = BigInt(snapshot.price as bigint);
+
+  await publishPrice(publisher, startPrice);
+  await refreshCollateralFeed(publisher);
+  console.log(`   index republished at ${px(startPrice)}`);
 
   step("2. confirm the victim holds a position to liquidate");
   const before = await positions(victim.publicKey());
@@ -220,8 +273,7 @@ async function main(): Promise<void> {
       `so would exercise a synthetic path rather than the real order flow.`
   );
   console.log(
-    `   position ${target.position_id}: ${target.is_long ? "LONG" : "SHORT"} ` +
-      `${target.size / PRECISION}`
+    `   position ${target.position_id}: ${target.is_long ? "LONG" : "SHORT"} ${amt(target.size)}`
   );
 
   step("3. move the index against the victim until health flips");
@@ -235,10 +287,11 @@ async function main(): Promise<void> {
       ? (drillPrice * 95n) / 100n
       : (drillPrice * 105n) / 100n;
     await publishPrice(publisher, drillPrice);
+    await refreshCollateralFeed(publisher);
     const h = await health(victim.publicKey());
     console.log(
-      `   index ${drillPrice / PRECISION} → equity ${h.equity / PRECISION}, ` +
-        `maintenance ${h.maintenance_margin_required / PRECISION}, ` +
+      `   index ${px(drillPrice)} → equity ${amt(h.equity).toFixed(4)}, ` +
+        `maintenance ${amt(h.maintenance_margin_required).toFixed(4)}, ` +
         `liquidatable=${h.liquidatable}`
     );
     flipped = h.liquidatable;
@@ -275,9 +328,7 @@ async function main(): Promise<void> {
     !remaining || remaining.size < target.size,
     "the liquidation transaction succeeded but the position did not shrink"
   );
-  console.log(
-    `   position size ${target.size / PRECISION} → ${(remaining?.size ?? 0n) / PRECISION}`
-  );
+  console.log(`   position size ${amt(target.size)} → ${amt(remaining?.size ?? 0n)}`);
 
   const liquidatorBalanceAfter = BigInt(
     (await read(CONTRACTS.vault, "balance_of", [
@@ -285,20 +336,33 @@ async function main(): Promise<void> {
       new Address(ASSETS.usdc).toScVal(),
     ])) as bigint
   );
-  assert(
-    liquidatorBalanceAfter > liquidatorBalanceBefore,
-    "the liquidator was not paid its reward — the incentive that makes " +
-      "liquidation happen at all is not wired"
-  );
+  // Name the cause rather than the symptom. A zero reward is almost always a
+  // zero `max_reward_bps`, which was settable only at `initialize` and had no
+  // reader, so the deployment could not tell you it had disabled its own
+  // liquidation economics.
+  if (liquidatorBalanceAfter <= liquidatorBalanceBefore) {
+    // Tolerant read: a deployment older than the reader must still produce a
+    // useful message rather than crashing the drill on the diagnostic itself.
+    const configured = await read(CONTRACTS.liquidation, "max_reward_bps", []).catch(() => null);
+    const detail =
+      configured === null || configured === undefined
+        ? "this deployment predates max_reward_bps() so the value cannot be read on-chain"
+        : `max_reward_bps = ${configured}`;
+    throw new Error(
+      `the liquidator was paid nothing (${detail}). Liquidation is mechanically ` +
+        `correct but economically dead: a keeper pays gas and receives nothing, ` +
+        `so in production no one would ever call it.`
+    );
+  }
   console.log(
-    `   liquidator reward = ${(liquidatorBalanceAfter - liquidatorBalanceBefore) * 1n} raw`
+    `   liquidator reward = ${amt(liquidatorBalanceAfter - liquidatorBalanceBefore)} USDC`
   );
 
   const victimSettlement = BigInt(
-    (await read(CONTRACTS.vault, "balance_of", [
+    ((await read(CONTRACTS.vault, "balance_of", [
       new Address(victim.publicKey()).toScVal(),
       new Address(ASSETS.usdc).toScVal(),
-    ])) as bigint
+    ])) ?? 0n) as bigint
   );
   if (victimSettlement < 0n) {
     console.warn(
@@ -310,9 +374,17 @@ async function main(): Promise<void> {
     console.log(`   victim settlement balance cleared to ${victimSettlement}`);
   }
 
+  // A liquidation closes the distressed side with no counterparty, so the book
+  // is now asymmetric by exactly the closed size (audit KRY-Q4). Report it: this
+  // is the exposure the insurance fund silently inherits.
+  const longOi = BigInt(((await read(CONTRACTS.engine, "long_open_interest", [nativeToScVal(MARKET.marketId, { type: "u32" })])) ?? 0n) as bigint);
+  const shortOi = BigInt(((await read(CONTRACTS.engine, "short_open_interest", [nativeToScVal(MARKET.marketId, { type: "u32" })])) ?? 0n) as bigint);
+  console.log(`   open interest now long ${amt(longOi)} vs short ${amt(shortOi)} — imbalance ${amt(longOi - shortOi)}`);
+
   step("6. restore the index");
   await publishPrice(publisher, startPrice);
-  console.log(`   index restored to ${startPrice / PRECISION}`);
+  await refreshCollateralFeed(publisher);
+  console.log(`   index restored to ${px(startPrice)}`);
 
   console.log("\n✅ Liquidation drill passed — liquidation works end to end.");
 }
