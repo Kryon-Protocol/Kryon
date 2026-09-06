@@ -8,6 +8,20 @@ pub fn collateral_value_after_haircut(value: i128, haircut_bps: u32) -> Result<i
     checked_sub(value, haircut)
 }
 
+/// The maximum leverage, in bps, that an initial-margin requirement implies.
+///
+/// Initial margin and max leverage are two statements of one constraint:
+/// posting `initial_margin_bps` of notional is exactly the same as capping
+/// leverage at `1 / initial_margin_bps`. In bps on both sides that is
+/// `10_000 * 10_000 / initial_margin_bps` — so a 1_000 bps (10%) requirement
+/// implies 100_000 bps, or 10x.
+pub fn implied_max_leverage_bps(initial_margin_bps: u32) -> Result<u32, CoreError> {
+    if initial_margin_bps == 0 {
+        return Err(CoreError::InvalidConfig);
+    }
+    Ok(100_000_000u32 / initial_margin_bps)
+}
+
 pub fn notional(size: i128, price: i128) -> Result<i128, CoreError> {
     if size <= 0 || price <= 0 {
         return Err(CoreError::InvalidAmount);
@@ -45,6 +59,14 @@ pub fn add_signed(values: &[i128]) -> Result<i128, CoreError> {
 mod tests {
     use super::*;
     use crate::PRECISION;
+
+    #[test]
+    fn implied_leverage_is_the_inverse_of_initial_margin() {
+        assert_eq!(implied_max_leverage_bps(1_000).unwrap(), 100_000); // 10%  -> 10x
+        assert_eq!(implied_max_leverage_bps(500).unwrap(), 200_000); //  5%  -> 20x
+        assert_eq!(implied_max_leverage_bps(10_000).unwrap(), 10_000); // 100% -> 1x
+        assert!(implied_max_leverage_bps(0).is_err());
+    }
 
     #[test]
     fn negative_collateral_is_debt_not_invalid_state() {

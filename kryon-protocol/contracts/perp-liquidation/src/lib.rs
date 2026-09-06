@@ -113,6 +113,22 @@ impl PerpLiquidationContract {
         Ok(())
     }
 
+    /// Who currently admins this contract.
+    ///
+    /// The protocol's whole security model is "the admin is the governance
+    /// timelock" — and until this existed there was no way to CHECK that from
+    /// outside for most contracts. An auditor, a user, or the handover script
+    /// had to take it on faith. A claim nobody can verify is not a control.
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     /// Re-point dependencies after a redeploy. Without these, redeploying the
     /// vault/engine/insurance would strand the liquidation contract on dead
     /// addresses (the values are otherwise only set at `initialize`).

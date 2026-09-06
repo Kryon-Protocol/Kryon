@@ -49,6 +49,11 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # The client's node:test suites had no runner and no script, so they had
+      # never executed despite CI being green. Run them.
+      - name: Unit tests
+        run: npm test
+
       - name: Build
         run: npm run build
 

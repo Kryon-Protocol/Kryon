@@ -1,8 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { Keypair, StrKey, TransactionBuilder, xdr, rpc as sorobanRpc } from "@stellar/stellar-sdk";
+import {
+  Address,
+  Keypair,
+  StrKey,
+  TransactionBuilder,
+  xdr,
+  rpc as sorobanRpc,
+} from "@stellar/stellar-sdk";
 import { matcherOperatorSecret, networkConfigFromRequest, networkFromRequest } from "@/lib/network-server";
 import { bodyTooLarge, rateLimit, requestKey } from "@/lib/rate-limit";
+
+/**
+ * True when `entryXdr` is a well-formed SorobanAuthorizationEntry whose address
+ * credentials name `address`.
+ *
+ * Source-account credentials are rejected outright: settlement signatures are
+ * always address credentials, and a source-account entry names nobody, so it
+ * could be posted into either party's slot.
+ */
+function authEntryBelongsTo(entryXdr: string, address: string): boolean {
+  try {
+    const entry = xdr.SorobanAuthorizationEntry.fromXDR(entryXdr, "base64");
+    const credentials = entry.credentials();
+    if (credentials.switch() !== xdr.SorobanCredentialsType.sorobanCredentialsAddress()) {
+      return false;
+    }
+    return Address.fromScAddress(credentials.address().address()).toString() === address;
+  } catch {
+    return false;
+  }
+}
 
 export async function POST(
   req: NextRequest,
@@ -22,10 +50,18 @@ export async function POST(
   if (typeof body.signedAuthEntry !== "string" || body.signedAuthEntry.length > 8192) {
     return NextResponse.json({ ok: false, error: "Invalid signed auth entry" }, { status: 400 });
   }
-  try {
-    xdr.SorobanAuthorizationEntry.fromXDR(body.signedAuthEntry, "base64");
-  } catch {
-    return NextResponse.json({ ok: false, error: "Invalid signed auth entry" }, { status: 400 });
+  // The entry must actually be the claimed address's. This route is
+  // unauthenticated — anyone who learns a TxJob id can post to it — so without
+  // this check a third party could drop a well-formed entry belonging to
+  // someone else (or to nobody) into a party's slot. Both slots then look
+  // filled, the job claims submission rights, and the on-chain
+  // `require_order_auth` rejects it: the fill is destroyed and the operator
+  // pays for a failed transaction, repeatable for every job in the queue.
+  if (!authEntryBelongsTo(body.signedAuthEntry, body.address)) {
+    return NextResponse.json(
+      { ok: false, error: "Signed auth entry does not belong to the given address" },
+      { status: 400 }
+    );
   }
   if (!(await rateLimit(requestKey(req, body.address), 30))) {
     return NextResponse.json({ ok: false, error: "Too many settlement requests" }, { status: 429 });

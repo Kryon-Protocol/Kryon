@@ -17,6 +17,7 @@ risk-engine = { workspace = true }
 soroban-sdk = { workspace = true }
 
 [dev-dependencies]
+perp-insurance = { workspace = true }
 perp-oracle-adapter = { workspace = true }
 perp-vault = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }

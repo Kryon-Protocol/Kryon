@@ -119,6 +119,22 @@ impl OracleAdapterContract {
         Ok(())
     }
 
+    /// Who currently admins this contract.
+    ///
+    /// The protocol's whole security model is "the admin is the governance
+    /// timelock" — and until this existed there was no way to CHECK that from
+    /// outside for most contracts. An auditor, a user, or the handover script
+    /// had to take it on faith. A claim nobody can verify is not a control.
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     /// Permissionless instance-TTL keepalive — prevents the oracle instance
     /// (feed configs, price keys) from being archived.
     pub fn extend_instance_ttl(env: Env) {
