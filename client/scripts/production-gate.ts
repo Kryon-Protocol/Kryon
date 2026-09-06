@@ -85,6 +85,13 @@ function main() {
     if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
       fail("distributed rate limit Redis is required for mainnet");
     }
+    // A perpetual has no expiry, so funding is the only mechanism tethering the
+    // mark to the index. Without this keeper the rate never accrues and the
+    // market silently stops being a perp — which is exactly what happened, and
+    // went unnoticed for the life of the protocol, because nothing checked.
+    if (!process.env.FUNDING_KEEPER_SECRET) {
+      fail("FUNDING_KEEPER_SECRET is required for mainnet — funding does not accrue without the keeper");
+    }
   }
 
   console.log(`production gate passed: ${ACTIVE_MARKET_SYMBOLS.join(", ")} on ${NETWORK.name}`);
