@@ -16,6 +16,13 @@ kryon-protocol/node_modules/
 .env
 .env.local
 .env.*.local
+# Per-network env files. `.env.mainnet` was tracked and held only public
+# NEXT_PUBLIC_* config, but a tracked file with that name is where a secret
+# eventually gets pasted, and git remembers. The committed copy is now
+# `.env.mainnet.example`; real ones stay local (KRY-S4).
+.env.mainnet
+.env.testnet
+.env.production
 
 # Deploy secrets (private keys — never commit)
 kryon-protocol/infra/deploy/*secrets*.env
