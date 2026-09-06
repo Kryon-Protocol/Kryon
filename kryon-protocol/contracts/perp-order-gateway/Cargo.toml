@@ -21,6 +21,7 @@ soroban-sdk = { workspace = true, features = ["hazmat-address"] }
 
 [dev-dependencies]
 perp-engine = { workspace = true }
+risk-engine = { workspace = true }
 perp-oracle-adapter = { workspace = true }
 perp-vault = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }

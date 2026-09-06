@@ -5,7 +5,9 @@ use protocol_core::{
     apply_bps, checked_add, checked_sub, div_precision, funding_pnl, mul_div, mul_precision,
     notional, CoreError, MarginMode, MarketConfig, OracleGuard, OracleSnapshot, Position,
 };
-use risk_engine::{update_from_imbalance, AccountHealth, FundingConfig, FundingState};
+use risk_engine::{
+    premium_from_mark, update_from_premium, AccountHealth, FundingConfig, FundingState,
+};
 use soroban_sdk::{
     contract, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
@@ -44,7 +46,13 @@ pub enum DataKey {
     FundingState(u32),
     Positions(Address),
     OpenInterest(u32),
+    /// Time-weighted mark accumulator per market — the mark the funding premium
+    /// is measured against. Written only by gateway-routed trades.
+    MarkState(u32),
     LongOpenInterest(u32),
+    /// KRY-Q4: cap on a market's open-interest notional, expressed in bps of the
+    /// insurance fund's effective balance. Absent = uncapped.
+    OiPolicy(u32),
     ShortOpenInterest(u32),
 }
 
@@ -53,6 +61,25 @@ pub enum DataKey {
 pub struct EngineMarketConfig {
     pub market: MarketConfig,
     pub max_execution_deviation_bps: u32,
+}
+
+/// Running time-weighted-average-price accumulator for one market.
+///
+/// `cumulative` is the integral of price over time (price-seconds) since
+/// `window_start`, brought up to date lazily: each write first credits the
+/// price that has been standing since `last_ts`, then adopts the new one.
+/// Reading the TWAP closes the window and starts a fresh one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkState {
+    /// Most recent executed fill price. 0 before the market has traded.
+    pub last_price: i128,
+    /// When `last_price` began standing.
+    pub last_ts: u64,
+    /// Price-seconds accumulated since `window_start`.
+    pub cumulative: i128,
+    /// Start of the current averaging window.
+    pub window_start: u64,
 }
 
 #[contracttype]
@@ -146,6 +173,22 @@ impl PerpEngineContract {
         Ok(())
     }
 
+    /// Who currently admins this contract.
+    ///
+    /// The protocol's whole security model is "the admin is the governance
+    /// timelock" — and until this existed there was no way to CHECK that from
+    /// outside for most contracts. An auditor, a user, or the handover script
+    /// had to take it on faith. A claim nobody can verify is not a control.
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     /// Permissionless instance-TTL keepalive — prevents the engine instance
     /// (markets, funding state keys, config) from being archived.
     pub fn extend_instance_ttl(env: Env) {
@@ -186,6 +229,65 @@ impl PerpEngineContract {
             },
         );
         Ok(())
+    }
+
+    /// Cap a market's open-interest notional at a multiple of the insurance
+    /// fund, in bps. `100_000` means "OI notional may not exceed 10x the fund".
+    /// Passing 0 removes the cap.
+    ///
+    /// KRY-Q4. Liquidation closes a distressed position with no counterparty on
+    /// the other side, so the insurance fund is the protocol's implicit
+    /// counterparty of last resort — carrying directional risk it never chose,
+    /// with no position limit. A full auto-deleveraging queue is the eventual
+    /// answer; this is the bound that makes the exposure finite in the
+    /// meantime. It cannot lose funds: it only ever refuses new risk.
+    pub fn set_oi_policy(
+        env: Env,
+        market_id: u32,
+        max_oi_per_insurance_bps: u32,
+    ) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        if market_id == 0 {
+            return Err(CoreError::InvalidConfig);
+        }
+        if max_oi_per_insurance_bps == 0 {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::OiPolicy(market_id));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::OiPolicy(market_id), &max_oi_per_insurance_bps);
+        }
+        Ok(())
+    }
+
+    pub fn oi_policy(env: Env, market_id: u32) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OiPolicy(market_id))
+    }
+
+    /// How well the insurance fund currently covers this market's open
+    /// interest, in bps: `effective_insurance * 10_000 / oi_notional`.
+    ///
+    /// Deliberately readable rather than only enforced, so the UI and keepers
+    /// can warn as coverage thins instead of discovering it when an open is
+    /// suddenly rejected. Returns `i128::MAX` for a market with no open
+    /// interest — infinitely covered, not divide-by-zero.
+    pub fn insurance_coverage_bps(env: Env, market_id: u32) -> Result<i128, CoreError> {
+        let market = load_market(&env, market_id)?;
+        let oi = open_interest(&env, market_id);
+        if oi <= 0 {
+            return Ok(i128::MAX);
+        }
+        let guard = OracleGuard {
+            max_age_secs: market.market.max_oracle_age_secs,
+            max_confidence_bps: market.market.max_oracle_confidence_bps,
+        };
+        let price = oracle_get_price(&env, &market.market.base_asset, Some(guard))?.price;
+        let oi_notional = notional(oi, price)?;
+        mul_div(effective_insurance(&env)?, 10_000, oi_notional)
     }
 
     pub fn set_fee_collector(env: Env, collector: Address) -> Result<(), CoreError> {
@@ -244,29 +346,56 @@ impl PerpEngineContract {
         Ok(())
     }
 
+    /// Advance funding for a market from the mark-vs-index premium.
+    ///
+    /// Permissionless: anyone may poke it, and doing so is how the market stays
+    /// tethered to spot. The rate is clamped by config and the charged window is
+    /// capped by `risk_engine::MAX_FUNDING_ELAPSED_SECS`, so a frequent caller
+    /// gains nothing and an infrequent one under-charges rather than over-charges.
+    ///
+    /// Fails closed on a stale or wide oracle: accruing funding against a price
+    /// the market itself would refuse to trade on is worse than not accruing.
     pub fn update_funding(env: Env, market_id: u32) -> Result<FundingState, CoreError> {
         let cfg: FundingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::FundingConfig(market_id))
             .ok_or(CoreError::InvalidConfig)?;
+        let market = load_market(&env, market_id)?;
         let current = funding_state(&env, market_id);
-        let oi_long = side_open_interest(&env, market_id, true);
-        let oi_short = side_open_interest(&env, market_id, false);
-        let next =
-            update_from_imbalance(&cfg, &current, oi_long, oi_short, env.ledger().timestamp())?;
+
+        // Premium is zero until the market has actually traded — a market with
+        // no mark has nothing to say about where it is relative to spot.
+        // Consuming the TWAP also closes the averaging window, so each funding
+        // period is priced on the time since the previous one.
+        let mark = consume_mark_twap(&env, market_id)?;
+        let premium = if mark > 0 {
+            let guard = OracleGuard {
+                max_age_secs: market.market.max_oracle_age_secs,
+                max_confidence_bps: market.market.max_oracle_confidence_bps,
+            };
+            let index = oracle_get_price(&env, &market.market.base_asset, Some(guard))?.price;
+            premium_from_mark(mark, index)?
+        } else {
+            0
+        };
+
+        let next = update_from_premium(&cfg, &current, premium, env.ledger().timestamp())?;
         env.storage()
             .persistent()
             .set(&DataKey::FundingState(market_id), &next);
         vault_set_funding_indexes(&env, market_id, next.long_index, next.short_index)?;
 
-        // Route the net funding surplus/deficit to the insurance fund.
-        // When oi_long != oi_short, longs pay delta*oi_long but shorts receive delta*oi_short.
-        // The difference (delta * oi_imbalance / PRECISION) is routed to insurance so no
-        // value leaks out of the protocol.
+        // Longs pay `delta * oi_long` and shorts receive `delta * oi_short`. In a
+        // matched book those are equal and this nets to zero; they diverge only
+        // after a liquidation closes one side without a counterparty. Route the
+        // difference to insurance so no value leaks out of the protocol.
         let delta = checked_sub(next.long_index, current.long_index)?;
         if delta != 0 {
-            let oi_imbalance = checked_sub(oi_long, oi_short)?;
+            let oi_imbalance = checked_sub(
+                side_open_interest(&env, market_id, true),
+                side_open_interest(&env, market_id, false),
+            )?;
             if oi_imbalance != 0 {
                 let net_surplus = mul_div(delta, oi_imbalance, protocol_core::PRECISION)?;
                 if net_surplus != 0 {
@@ -279,6 +408,19 @@ impl PerpEngineContract {
         }
 
         Ok(next)
+    }
+
+    /// The market's standing mark — the last executed fill price, or 0 before
+    /// the market has traded. Read-only: it does not disturb the TWAP window
+    /// that `update_funding` averages over.
+    pub fn mark_price(env: Env, market_id: u32) -> i128 {
+        last_mark(&env, market_id)
+    }
+
+    /// The full time-weighted mark accumulator, for keepers and dashboards that
+    /// want to see how much time the current funding window has accrued.
+    pub fn mark_state(env: Env, market_id: u32) -> MarkState {
+        mark_state(&env, market_id)
     }
 
     pub fn charge_trade_fee(
@@ -326,11 +468,13 @@ impl PerpEngineContract {
         }
         let market = load_market(&env, market_id)?;
         validate_execution_price(&env, &market, execution_price)?;
+        record_mark(&env, market_id, execution_price)?;
         let current_oi = open_interest(&env, market_id);
         let next_oi = checked_add(current_oi, size)?;
         if next_oi > market.market.max_open_interest {
             return Err(CoreError::OpenInterestExceeded);
         }
+        require_insurance_headroom(&env, market_id, next_oi, execution_price)?;
 
         let mut positions = load_positions(&env, &user);
         // I2: hard cap well below the risk-engine's 64-entry account_health
@@ -400,12 +544,14 @@ impl PerpEngineContract {
         let mut position = positions.get(index).ok_or(CoreError::PositionNotFound)?;
         let market = load_market(&env, position.market_id)?;
         validate_execution_price(&env, &market, execution_price)?;
+        record_mark(&env, position.market_id, execution_price)?;
         let settled_funding = settle_position_funding(&env, &user, &mut position)?;
 
         let next_oi = checked_add(open_interest(&env, position.market_id), size_delta)?;
         if next_oi > market.market.max_open_interest {
             return Err(CoreError::OpenInterestExceeded);
         }
+        require_insurance_headroom(&env, position.market_id, next_oi, execution_price)?;
         let old_notional = mul_precision(position.size, position.entry_price)?;
         let added_notional = mul_precision(size_delta, execution_price)?;
         let new_size = checked_add(position.size, size_delta)?;
@@ -548,6 +694,13 @@ fn validate_engine_market(config: &EngineMarketConfig) -> Result<(), CoreError> 
         || config.market.max_oracle_age_secs == 0
         || config.market.max_oracle_confidence_bps > 10_000
         || config.max_execution_deviation_bps > 10_000
+    {
+        return Err(CoreError::InvalidConfig);
+    }
+    // KRY-Q8: keep the declared leverage cap consistent with the margin
+    // requirement that actually enforces it. See the same check in the vault.
+    if config.market.max_leverage_bps
+        > protocol_core::implied_max_leverage_bps(config.market.initial_margin_bps)?
     {
         return Err(CoreError::InvalidConfig);
     }
@@ -768,6 +921,144 @@ fn funding_state(env: &Env, market_id: u32) -> FundingState {
         })
 }
 
+/// The insurance fund's balance net of bad debt it has already recorded, in the
+/// settlement asset. Never negative.
+///
+/// Netting matters: a fund holding 1,000 against 900 of recorded bad debt has
+/// 100 of real capacity, and treating the gross balance as capacity is exactly
+/// how a fund that is already underwater keeps underwriting new risk.
+fn effective_insurance(env: &Env) -> Result<i128, CoreError> {
+    let Some(insurance) = insurance_address(env) else {
+        return Ok(0);
+    };
+    let asset = settlement_asset(env)?;
+    let balance = env.invoke_contract::<i128>(
+        &insurance,
+        &Symbol::new(env, "balance_of"),
+        vec![env, asset.into_val(env)],
+    );
+    let bad_debt = env.invoke_contract::<i128>(
+        &insurance,
+        &Symbol::new(env, "bad_debt_of"),
+        vec![env, asset.into_val(env)],
+    );
+    Ok(core::cmp::max(0, checked_sub(balance, bad_debt)?))
+}
+
+/// Refuse new exposure a depleted insurance fund could not stand behind.
+///
+/// Applies only to opening and increasing. Reducing and closing are always
+/// allowed — a cap that blocked exits would turn a thin insurance fund into a
+/// trap, which is the opposite of the intent.
+fn require_insurance_headroom(
+    env: &Env,
+    market_id: u32,
+    next_oi: i128,
+    price: i128,
+) -> Result<(), CoreError> {
+    let Some(max_bps) = env
+        .storage()
+        .persistent()
+        .get::<DataKey, u32>(&DataKey::OiPolicy(market_id))
+    else {
+        return Ok(());
+    };
+    let cap = mul_div(effective_insurance(env)?, max_bps as i128, 10_000)?;
+    if notional(next_oi, price)? > cap {
+        return Err(CoreError::InsuranceFundInsufficient);
+    }
+    Ok(())
+}
+
+fn mark_state(env: &Env, market_id: u32) -> MarkState {
+    env.storage()
+        .persistent()
+        .get(&DataKey::MarkState(market_id))
+        .unwrap_or(MarkState {
+            last_price: 0,
+            last_ts: env.ledger().timestamp(),
+            cumulative: 0,
+            window_start: env.ledger().timestamp(),
+        })
+}
+
+/// Credit the price that has been standing since `last_ts` into `cumulative`,
+/// then move `last_ts` to `now`. Idempotent within a ledger.
+fn accrue_mark(state: &mut MarkState, now: u64) -> Result<(), CoreError> {
+    if now > state.last_ts && state.last_price > 0 {
+        let held = (now - state.last_ts) as i128;
+        state.cumulative = checked_add(state.cumulative, mul_div(state.last_price, held, 1)?)?;
+    }
+    state.last_ts = now;
+    Ok(())
+}
+
+/// Record an executed fill price into the market's time-weighted mark.
+///
+/// Called only for gateway-routed trades. Liquidation fills are deliberately
+/// excluded: they execute at a keeper-chosen price against a distressed
+/// account, so letting them set the mark would let a liquidator move funding.
+///
+/// Time-weighted rather than fill-weighted (KRY-Q6). Under a fill-count EMA the
+/// cost of moving the mark was N trades, which a manipulator can produce in a
+/// single ledger for the price of the spread. Weighting by time instead means
+/// the mark reflects how LONG a price was held, so pushing the premium requires
+/// holding the book away from the index for a real fraction of the funding
+/// window — against everyone willing to trade back.
+fn record_mark(env: &Env, market_id: u32, execution_price: i128) -> Result<(), CoreError> {
+    let now = env.ledger().timestamp();
+    let mut state = mark_state(env, market_id);
+    accrue_mark(&mut state, now)?;
+    if state.last_price == 0 {
+        // First ever trade: start the window here rather than averaging in the
+        // dead time before the market existed.
+        state.window_start = now;
+        state.cumulative = 0;
+    }
+    state.last_price = execution_price;
+    env.storage()
+        .persistent()
+        .set(&DataKey::MarkState(market_id), &state);
+    Ok(())
+}
+
+/// The market's time-weighted mark over the window since the last read, and the
+/// side effect of closing that window so the next read averages fresh time.
+///
+/// Returns 0 for a market that has never traded — the caller treats that as
+/// "no opinion", not as a price of zero.
+fn consume_mark_twap(env: &Env, market_id: u32) -> Result<i128, CoreError> {
+    let now = env.ledger().timestamp();
+    let mut state = mark_state(env, market_id);
+    if state.last_price <= 0 {
+        return Ok(0);
+    }
+    accrue_mark(&mut state, now)?;
+
+    let elapsed = now.saturating_sub(state.window_start) as i128;
+    // A zero-length window (funding poked in the same ledger as the last read)
+    // has no time to average over; the standing price is the best estimate.
+    let twap = if elapsed > 0 {
+        mul_div(state.cumulative, 1, elapsed)?
+    } else {
+        state.last_price
+    };
+
+    // Close the window: the next read averages only time from here forward.
+    state.cumulative = 0;
+    state.window_start = now;
+    env.storage()
+        .persistent()
+        .set(&DataKey::MarkState(market_id), &state);
+    Ok(twap)
+}
+
+/// Read-only view of the market's current standing mark (the last executed fill
+/// price), without disturbing the TWAP window.
+fn last_mark(env: &Env, market_id: u32) -> i128 {
+    mark_state(env, market_id).last_price
+}
+
 fn fee_config(env: &Env, market_id: u32) -> FeeConfig {
     env.storage()
         .persistent()
@@ -858,6 +1149,10 @@ fn reduce_position_internal(
     }
     let market = load_market(&env, position.market_id)?;
     validate_execution_price(&env, &market, execution_price)?;
+    // Liquidation fills (require_initial_margin == false) must not move the mark.
+    if require_initial_margin {
+        record_mark(&env, position.market_id, execution_price)?;
+    }
     let settled_funding = settle_position_funding(&env, &user, &mut position)?;
     let realized_pnl = realized_pnl(&position, size_delta, execution_price)?;
 
@@ -909,6 +1204,7 @@ fn reduce_position_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use perp_insurance::{PerpInsuranceContract, PerpInsuranceContractClient};
     use perp_oracle_adapter::{OracleAdapterContract, OracleAdapterContractClient};
     use perp_vault::{PerpVaultContract, PerpVaultContractClient};
     use protocol_core::{OracleSource, PRECISION};
@@ -1194,9 +1490,29 @@ mod tests {
         assert_eq!(s.vault.balance_of(&s.admin, &s.settlement_asset), 0);
     }
 
+    /// KRY-Q4: a market may not carry more open interest than the insurance
+    /// fund can stand behind.
+    ///
+    /// Liquidation closes a distressed position with no counterparty, so the
+    /// fund is the protocol's implicit other side. Before this cap that
+    /// exposure was unbounded — the fund could be a rounding error against the
+    /// open interest it was underwriting and nothing said so.
     #[test]
-    fn funding_update_is_settled_before_close() {
+    fn open_interest_is_capped_against_the_insurance_fund() {
         let s = setup();
+
+        // Fund insurance with 100 units of the settlement asset and allow OI
+        // notional up to 2x that — a 200 notional ceiling.
+        let insurance_id = s.env.register(PerpInsuranceContract, ());
+        let insurance = PerpInsuranceContractClient::new(&s.env, &insurance_id);
+        insurance.initialize(&s.admin, &s.admin);
+        token::StellarAssetClient::new(&s.env, &s.settlement_asset)
+            .mint(&s.admin, &(100 * PRECISION));
+        insurance.deposit(&s.admin, &s.settlement_asset, &(100 * PRECISION));
+        s.engine.set_insurance(&insurance_id);
+        s.engine.set_oi_policy(&1, &20_000); // 2x, in bps
+
+        // 1 unit at price 100 = 100 notional. Inside the 200 ceiling.
         let opened = s.engine.open_position(
             &s.user,
             &1,
@@ -1205,10 +1521,85 @@ mod tests {
             &(100 * PRECISION),
             &MarginMode::Cross,
         );
+        assert_eq!(s.engine.open_interest(&1), PRECISION);
+
+        // Coverage is now 100 insurance against 100 notional = 10_000 bps.
+        assert_eq!(s.engine.insurance_coverage_bps(&1), 10_000);
+
+        // A second unit would take OI notional to 200... still exactly at the
+        // ceiling, so it is allowed.
+        s.engine.open_position(
+            &s.user,
+            &1,
+            &PRECISION,
+            &true,
+            &(100 * PRECISION),
+            &MarginMode::Cross,
+        );
+
+        // A third crosses it and must be refused.
+        assert!(
+            s.engine
+                .try_open_position(
+                    &s.user,
+                    &1,
+                    &PRECISION,
+                    &true,
+                    &(100 * PRECISION),
+                    &MarginMode::Cross,
+                )
+                .is_err(),
+            "opening past the insurance-backed ceiling must be refused",
+        );
+
+        // Increasing an existing position is the same new risk by another name.
+        assert!(
+            s.engine
+                .try_increase_position(&s.user, &opened.position_id, &PRECISION, &(100 * PRECISION))
+                .is_err(),
+            "increase must be capped too, or the cap is trivially bypassed",
+        );
+
+        // EXITING is always allowed. A cap that blocked closes would turn a
+        // thin insurance fund into a trap — the opposite of the intent.
+        let closed = s
+            .engine
+            .close_position(&s.user, &opened.position_id, &(100 * PRECISION));
+        assert_eq!(closed.remaining_size, 0);
+    }
+
+    /// With no policy configured the cap is inert, so existing deployments are
+    /// unaffected until governance opts in.
+    #[test]
+    fn markets_without_an_oi_policy_are_uncapped() {
+        let s = setup();
+        assert_eq!(s.engine.oi_policy(&1), None);
+        s.engine.open_position(
+            &s.user,
+            &1,
+            &(5 * PRECISION),
+            &true,
+            &(100 * PRECISION),
+            &MarginMode::Cross,
+        );
+        assert_eq!(s.engine.open_interest(&1), 5 * PRECISION);
+    }
+
+    #[test]
+    fn funding_update_is_settled_before_close() {
+        let s = setup();
+        // Trade 1% rich against the 100 index so there is a premium to fund on.
+        // (Under the old open-interest-imbalance formula this test passed only
+        // because `open_position` is called directly here, creating a one-sided
+        // book that a matched gateway fill can never produce — see KRY-Q1.)
+        let mark = 101 * PRECISION;
+        let opened =
+            s.engine
+                .open_position(&s.user, &1, &PRECISION, &true, &mark, &MarginMode::Cross);
         s.engine.set_funding_config(
             &1,
             &FundingConfig {
-                imbalance_coeff: PRECISION / 100,
+                imbalance_coeff: PRECISION,
                 max_rate_per_hour: PRECISION / 100,
             },
         );
@@ -1217,9 +1608,7 @@ mod tests {
         });
 
         let funding = s.engine.update_funding(&1);
-        let closed = s
-            .engine
-            .close_position(&s.user, &opened.position_id, &(100 * PRECISION));
+        let closed = s.engine.close_position(&s.user, &opened.position_id, &mark);
 
         assert_eq!(funding.long_index, PRECISION / 100);
         assert_eq!(closed.realized_pnl, 0);

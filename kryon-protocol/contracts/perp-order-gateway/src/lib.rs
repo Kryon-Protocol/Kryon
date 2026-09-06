@@ -30,6 +30,15 @@ pub enum DataKey {
 /// rejects them), so reclamation after expiry+grace cannot re-enable a replay.
 pub const RECLAIM_GRACE_SECS: u64 = 86_400; // 24h
 
+/// Longest lifetime the gateway will settle a signed order for.
+///
+/// Two jobs. It bounds how long a signed order stays live on-chain, matching
+/// the 7-day cap the off-chain intake already enforces. And it makes a cancel
+/// tombstone safe to reclaim: because no order can outlive `now + this`, a
+/// tombstone stamped at least that far out is guaranteed to outlive every order
+/// that could still fill under the cancelled nonce.
+pub const MAX_ORDER_TTL_SECS: u64 = 7 * 86_400;
+
 /// Persistent-entry TTL management (values in ledgers, ~5s each).
 /// Entries are extended to ~30 days whenever written; anything still live
 /// past its order expiry only needs to survive until reclamation.
@@ -164,10 +173,33 @@ impl PerpOrderGatewayContract {
         Ok(())
     }
 
-    /// Cancel an order by nonce. `expiry_ts` must be the order's real expiry —
-    /// it bounds how long the tombstone must be kept before `reclaim_order_state`
-    /// may prune it. Supplying an earlier expiry only shortens the caller's own
-    /// cancel tombstone (cancel requires the owner's auth), never anyone else's.
+    /// Who currently admins this contract.
+    ///
+    /// The protocol's whole security model is "the admin is the governance
+    /// timelock" — and until this existed there was no way to CHECK that from
+    /// outside for most contracts. An auditor, a user, or the handover script
+    /// had to take it on faith. A claim nobody can verify is not a control.
+    pub fn admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Cancel an order by nonce.
+    ///
+    /// `expiry_ts` is a hint about how long the tombstone must outlive the
+    /// order; it is CLAMPED UP to `now + MAX_ORDER_TTL_SECS`, never trusted
+    /// downward. Taking it at face value was a way to un-cancel an order: a
+    /// caller who passed an expiry far earlier than their order's real one got
+    /// a tombstone that `reclaim_order_state` could prune, permissionlessly,
+    /// while the signed order was still inside its own expiry — at which point
+    /// the operator could settle an order the owner had cancelled. Clamping to
+    /// the protocol-wide maximum order lifetime closes that: the tombstone
+    /// always outlives any order `validate_order` would still accept.
     pub fn cancel_order(
         env: Env,
         owner: Address,
@@ -175,8 +207,10 @@ impl PerpOrderGatewayContract {
         expiry_ts: u64,
     ) -> Result<(), CoreError> {
         owner.require_auth();
+        let floor = env.ledger().timestamp().saturating_add(MAX_ORDER_TTL_SECS);
+        let retain_until = core::cmp::max(expiry_ts, floor);
         let key = DataKey::Cancelled(owner, nonce);
-        env.storage().persistent().set(&key, &expiry_ts);
+        env.storage().persistent().set(&key, &retain_until);
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_TTL_THRESHOLD,
@@ -567,7 +601,14 @@ fn validate_order(
     if order.size <= 0 || order.limit_price <= 0 {
         return Err(CoreError::InvalidAmount);
     }
-    if env.ledger().timestamp() > order.expiry_ts {
+    let now = env.ledger().timestamp();
+    if now > order.expiry_ts {
+        return Err(CoreError::OrderExpired);
+    }
+    // Cap how far out a signed order may reach. This is what makes the clamped
+    // cancel tombstone in `cancel_order` a complete defence rather than a
+    // heuristic, and it matches the off-chain intake's own 7-day ceiling.
+    if order.expiry_ts > now.saturating_add(MAX_ORDER_TTL_SECS) {
         return Err(CoreError::OrderExpired);
     }
     if is_cancelled(env, &order.owner, order.nonce) {
@@ -784,6 +825,32 @@ mod tests {
         vault: PerpVaultContractClient<'a>,
         gateway: PerpOrderGatewayContractClient<'a>,
         engine: PerpEngineContractClient<'a>,
+        oracle: OracleAdapterContractClient<'a>,
+        publisher: Address,
+    }
+
+    /// Re-publish both feeds as of the current ledger time: BTC at `price` as
+    /// the market index, USDC at par for collateral valuation.
+    ///
+    /// Needed after any time jump. Everything fails closed on a stale oracle —
+    /// `update_funding` on the index, and any vault health read on the
+    /// collateral feed — which is the point of it.
+    fn republish_index(s: &Setup, price: i128) {
+        let now = s.env.ledger().timestamp();
+        s.oracle.write_price(
+            &Symbol::new(&s.env, "BTC"),
+            &s.publisher,
+            &price,
+            &(PRECISION / 100),
+            &now,
+        );
+        s.oracle.write_price(
+            &Symbol::new(&s.env, "USDC"),
+            &s.publisher,
+            &PRECISION,
+            &(PRECISION / 100),
+            &now,
+        );
     }
 
     fn setup() -> Setup<'static> {
@@ -872,6 +939,8 @@ mod tests {
             vault,
             gateway,
             engine,
+            oracle,
+            publisher,
         }
     }
 
@@ -917,6 +986,236 @@ mod tests {
         assert!(s.gateway.try_settle_fill(&fill).is_err());
     }
 
+    /// Regression for KRY-Q1.
+    ///
+    /// The OI-imbalance funding formula this replaced could never fire: every
+    /// fill moves one account long-ward and one short-ward by `fill_size`, so
+    /// `long_oi - short_oi` is invariant at zero for any matched book. This
+    /// test pins that invariant down, then shows funding now comes from the
+    /// mark-vs-index premium instead — which is not pinned to anything.
+    #[test]
+    fn funding_tracks_the_premium_not_the_open_interest_imbalance() {
+        use soroban_sdk::testutils::Ledger;
+
+        let s = setup();
+
+        // Trade rich: fills at 101 against an index of 100 (inside the market's
+        // 100bps execution band).
+        let rich = 101 * PRECISION;
+        for (i, maker_long) in [false, false, true].iter().enumerate() {
+            let n = (i as u64 + 1) * 10;
+            // Both sides must be willing to trade at `rich`: the long's limit is
+            // a ceiling and the short's a floor, so pin both to the fill price.
+            let mut maker = order(s.maker.clone(), *maker_long, n, &s.env);
+            let mut taker = order(s.taker.clone(), !*maker_long, n + 1, &s.env);
+            maker.limit_price = rich;
+            taker.limit_price = rich;
+            s.gateway.settle_fill(&MatchedFill {
+                maker,
+                taker,
+                fill_size: PRECISION,
+                fill_price: rich,
+            });
+            // The invariant that made imbalance-based funding dead on arrival.
+            assert_eq!(
+                s.engine.long_open_interest(&1),
+                s.engine.short_open_interest(&1),
+                "long/short OI must stay equal in a matched book (fill {i})",
+            );
+        }
+
+        assert!(
+            s.engine.mark_price(&1) > 100 * PRECISION,
+            "the mark must reflect that the book traded above the index",
+        );
+
+        s.engine.set_funding_config(
+            &1,
+            &risk_engine::FundingConfig {
+                imbalance_coeff: PRECISION,
+                max_rate_per_hour: PRECISION / 100,
+            },
+        );
+        let t0 = s.env.ledger().timestamp();
+        s.env.ledger().set_timestamp(t0 + 3_600);
+        republish_index(&s, 100 * PRECISION);
+
+        let state = s.engine.update_funding(&1);
+
+        assert!(
+            state.rate_per_hour > 0,
+            "a perp trading above its index must charge longs — this was \
+             structurally impossible under the OI-imbalance formula",
+        );
+        assert!(state.long_index > 0, "longs pay");
+        assert!(state.short_index < 0, "shorts receive the same amount");
+    }
+
+    /// Regression for KRY-Q6: the mark is weighted by TIME, not by fill count.
+    ///
+    /// Under the fill-count EMA this replaced, N trades moved the mark
+    /// regardless of when they happened — so a manipulator could print the
+    /// whole burst in one ledger for the cost of the spread and set the funding
+    /// premium outright. Weighting by time means a price only counts for as
+    /// long as it is actually held, so a late burst barely moves the average
+    /// while the same price held across the window moves it fully.
+    #[test]
+    fn a_late_burst_of_rich_fills_barely_moves_funding() {
+        use soroban_sdk::testutils::Ledger;
+
+        // Same market, same fills, same funding config — the only difference
+        // between the two runs is WHEN the rich prints land.
+        fn run(burst_at_offset: u64) -> i128 {
+            let s = setup();
+            let t0 = s.env.ledger().timestamp();
+            let rich = 101 * PRECISION;
+
+            s.engine.set_funding_config(
+                &1,
+                &risk_engine::FundingConfig {
+                    imbalance_coeff: PRECISION,
+                    // High enough that the clamp cannot mask the difference.
+                    max_rate_per_hour: PRECISION,
+                },
+            );
+
+            // Open the averaging window with a fill at the index price.
+            s.gateway.settle_fill(&MatchedFill {
+                maker: order(s.maker.clone(), false, 1, &s.env),
+                taker: order(s.taker.clone(), true, 2, &s.env),
+                fill_size: PRECISION,
+                fill_price: 100 * PRECISION,
+            });
+
+            // Jump to the burst, re-publishing the index so the fill is inside
+            // the market's execution band and the oracle is not stale.
+            s.env.ledger().set_timestamp(t0 + burst_at_offset);
+            republish_index(&s, 100 * PRECISION);
+            for i in 0..3u64 {
+                let n = 10 + i * 2;
+                let mut maker = order(s.maker.clone(), false, n, &s.env);
+                let mut taker = order(s.taker.clone(), true, n + 1, &s.env);
+                maker.limit_price = rich;
+                taker.limit_price = rich;
+                maker.expiry_ts = s.env.ledger().timestamp() + 600;
+                taker.expiry_ts = s.env.ledger().timestamp() + 600;
+                s.gateway.settle_fill(&MatchedFill {
+                    maker,
+                    taker,
+                    fill_size: PRECISION,
+                    fill_price: rich,
+                });
+            }
+
+            // Close the window one hour after it opened, in both runs.
+            s.env.ledger().set_timestamp(t0 + 3_600);
+            republish_index(&s, 100 * PRECISION);
+            s.engine.update_funding(&1).rate_per_hour
+        }
+
+        // Rich for the last 600s of the hour vs. rich for 3,000s of it.
+        let late_burst = run(3_000);
+        let sustained = run(600);
+
+        assert!(late_burst > 0, "a rich mark still charges longs something");
+        assert!(
+            sustained > late_burst * 3,
+            "holding the mark rich for 5x as long must cost far more funding \
+             than the same three prints landing at the end of the window \
+             (sustained={sustained}, late_burst={late_burst})",
+        );
+    }
+
+    /// A market trading exactly at its index should charge nothing.
+    #[test]
+    fn funding_stays_flat_when_the_mark_tracks_the_index() {
+        use soroban_sdk::testutils::Ledger;
+
+        let s = setup();
+        s.gateway.settle_fill(&MatchedFill {
+            maker: order(s.maker.clone(), false, 1, &s.env),
+            taker: order(s.taker.clone(), true, 7, &s.env),
+            fill_size: PRECISION,
+            fill_price: 100 * PRECISION,
+        });
+        s.engine.set_funding_config(
+            &1,
+            &risk_engine::FundingConfig {
+                imbalance_coeff: PRECISION,
+                max_rate_per_hour: PRECISION / 100,
+            },
+        );
+        let t0 = s.env.ledger().timestamp();
+        s.env.ledger().set_timestamp(t0 + 3_600);
+        republish_index(&s, 100 * PRECISION);
+
+        let state = s.engine.update_funding(&1);
+        assert_eq!(state.rate_per_hour, 0);
+        assert_eq!(state.long_index, 0);
+    }
+
+    /// Regression for KRY-S2: a cancel could be undone.
+    ///
+    /// Cancelling with an understated `expiry_ts` used to produce a tombstone
+    /// that `reclaim_order_state` would prune 24h later, while the signed order
+    /// was still days inside its own expiry — letting the operator settle an
+    /// order its owner had cancelled. The tombstone is now clamped to the
+    /// protocol-wide maximum order lifetime.
+    #[test]
+    fn a_cancelled_order_cannot_be_revived_by_reclaiming_its_tombstone() {
+        use soroban_sdk::testutils::Ledger;
+
+        let s = setup();
+        let now = s.env.ledger().timestamp();
+
+        // A long-dated order, cancelled while claiming it expires immediately.
+        let mut maker = order(s.maker.clone(), false, 1, &s.env);
+        let mut taker = order(s.taker.clone(), true, 7, &s.env);
+        maker.expiry_ts = now + 6 * 86_400;
+        taker.expiry_ts = now + 6 * 86_400;
+        s.gateway.cancel_order(&s.maker, &1, &now);
+
+        // Well past the old grace window, but still inside the order's real life.
+        s.env.ledger().set_timestamp(now + 2 * 86_400);
+        s.gateway.reclaim_order_state(&s.maker, &vec![&s.env, 1u64]);
+
+        assert!(
+            s.gateway.is_cancelled(&s.maker, &1),
+            "the cancel tombstone must outlive every order that could still fill",
+        );
+        assert!(
+            s.gateway
+                .try_settle_fill(&MatchedFill {
+                    maker,
+                    taker,
+                    fill_size: PRECISION,
+                    fill_price: 100 * PRECISION,
+                })
+                .is_err(),
+            "a cancelled order must never settle",
+        );
+    }
+
+    /// Regression for KRY-S2: orders may not reach past the protocol TTL cap.
+    #[test]
+    fn rejects_an_order_dated_past_the_max_ttl() {
+        let s = setup();
+        let now = s.env.ledger().timestamp();
+        let mut maker = order(s.maker.clone(), false, 1, &s.env);
+        let mut taker = order(s.taker.clone(), true, 7, &s.env);
+        maker.expiry_ts = now + MAX_ORDER_TTL_SECS + 1;
+        taker.expiry_ts = now + MAX_ORDER_TTL_SECS + 1;
+        assert!(s
+            .gateway
+            .try_settle_fill(&MatchedFill {
+                maker,
+                taker,
+                fill_size: PRECISION,
+                fill_price: 100 * PRECISION,
+            })
+            .is_err());
+    }
+
     #[test]
     fn reclaim_prunes_only_expired_entries() {
         use soroban_sdk::testutils::Ledger;
@@ -940,12 +1239,26 @@ mod tests {
         assert_eq!(s.gateway.filled(&s.maker, &1), PRECISION);
         assert!(s.gateway.is_cancelled(&s.maker, &2));
 
-        // Jump past expiry + grace: both entries become reclaimable.
+        // Jump past expiry + grace: the FILL entry becomes reclaimable. The
+        // cancel tombstone does not — it is clamped to the maximum order
+        // lifetime so it can never be pruned out from under a live order
+        // (KRY-S2), and reaping it early is exactly the un-cancel bug.
         s.env.ledger().with_mut(|l| {
             l.timestamp = expiry + RECLAIM_GRACE_SECS + 1;
         });
-        assert_eq!(s.gateway.reclaim_order_state(&s.maker, &nonces), 2);
+        assert_eq!(s.gateway.reclaim_order_state(&s.maker, &nonces), 1);
         assert_eq!(s.gateway.filled(&s.maker, &1), 0);
+        assert!(
+            s.gateway.is_cancelled(&s.maker, &2),
+            "cancel tombstones outlive the maximum order lifetime",
+        );
+
+        // Past the clamped retention window the tombstone is reclaimable too:
+        // no order signed before it could still be inside its own expiry.
+        s.env.ledger().with_mut(|l| {
+            l.timestamp = expiry + MAX_ORDER_TTL_SECS + RECLAIM_GRACE_SECS + 2;
+        });
+        assert_eq!(s.gateway.reclaim_order_state(&s.maker, &nonces), 1);
         assert!(!s.gateway.is_cancelled(&s.maker, &2));
 
         // Replay of the reclaimed order is still impossible: it is expired.

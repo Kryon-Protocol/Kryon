@@ -121,6 +121,12 @@ impl PerpVaultContract {
         Ok(())
     }
 
+    /// The nominated-but-not-yet-accepted admin, if a transfer is in flight.
+    /// Makes a half-finished handover visible instead of silent.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     /// Permissionless instance-TTL keepalive — prevents the vault instance
     /// (collateral configs, balances keys) from being archived.
     pub fn extend_instance_ttl(env: Env) {
@@ -590,6 +596,17 @@ fn validate_market_config(config: &MarketConfig) -> Result<(), CoreError> {
         || config.max_oracle_age_secs == 0
         || config.max_oracle_confidence_bps > 10_000
         || config.max_open_interest <= 0
+    {
+        return Err(CoreError::InvalidConfig);
+    }
+    // KRY-Q8: `max_leverage_bps` used to be checked for non-zero and then never
+    // read by anything, which advertised a second, independent leverage limit
+    // that did not exist — the only real cap is the initial-margin requirement.
+    // Rather than leave a field that can silently contradict the constraint it
+    // describes, require the two to agree. A market may declare a TIGHTER cap
+    // than its margin implies (that is a deliberate policy choice), but never a
+    // looser one, which would be a published limit the protocol does not honour.
+    if config.max_leverage_bps > protocol_core::implied_max_leverage_bps(config.initial_margin_bps)?
     {
         return Err(CoreError::InvalidConfig);
     }
