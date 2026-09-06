@@ -17,7 +17,6 @@
     "dev:liquidator": "tsx --env-file=.env.local scripts/liquidation-keeper.ts",
     "dev:ttl": "tsx --env-file=.env.local scripts/ttl-keeper.ts",
     "dev:monitor": "tsx --env-file=.env.local scripts/monitor.ts",
-    "test": "tsx --test config/markets.test.ts lib/format.test.ts lib/market/order-intent.test.ts lib/stellar/collateral.test.ts",
     "production:gate": "tsx scripts/production-gate.ts",
     "production:live-gate": "tsx scripts/live-production-gate.ts",
     "cf:build": "opennextjs-cloudflare build",

@@ -82,3 +82,7 @@ scripts/check-vault-balance.ts
 scripts/migrate-add-order-signature.ts
 scripts/setup-usdc-trustline.ts
 scripts/setup-usdc-settlement.ts
+
+# Unit tests — kept local, not shipped in the public repo.
+*.test.ts
+*.test.tsx
