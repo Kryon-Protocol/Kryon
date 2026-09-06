@@ -6,6 +6,21 @@
 
 import type { ReactNode } from "react";
 
+export function Usdt0Logo({ size = 16 }: { size?: number }) {
+  // Tether green with the USD₮ tie, plus a ring to read as the omnichain
+  // (LayerZero OFT) variant rather than native USDT.
+  return (
+    <svg width={size} height={size} viewBox="0 0 2000 2000" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <circle cx="1000" cy="1000" r="1000" fill="#009393" />
+      <circle cx="1000" cy="1000" r="880" fill="none" stroke="#ffffff" strokeOpacity="0.35" strokeWidth="55" />
+      <path
+        fill="#ffffff"
+        d="M1128 872v-138h318V522H556v212h318v138c-258 12-452 63-452 124s194 112 452 124v442h254v-442c258-12 452-63 452-124s-194-112-452-124zm0 407v-1c-6 0-39 2-127 2-70 0-119-2-137-2v1c-274-12-478-60-478-117s204-105 478-117v186c18 1 69 4 138 4 84 0 119-3 126-4v-186c273 12 477 60 477 117s-204 105-477 117z"
+      />
+    </svg>
+  );
+}
+
 export function UsdcLogo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 2000 2000" xmlns="http://www.w3.org/2000/svg" aria-hidden>
@@ -182,6 +197,7 @@ export function LetterLogo({ symbol, size = 16 }: { symbol: string; size?: numbe
 
 const LOGOS: Record<string, (p: { size?: number }) => ReactNode> = {
   USDC: UsdcLogo,
+  USDT0: Usdt0Logo,
   XLM: XlmLogo,
   BTC: BtcLogo,
   ETH: EthLogo,

@@ -74,6 +74,50 @@ export async function getTokenBalance(
   return val ? scValToI128(val) : 0n;
 }
 
+/** Raw `CollateralConfig` as listed on the vault, or null if never listed. */
+export interface RawCollateralConfig {
+  oracleSymbol: string;
+  haircutBps: number;
+  active: boolean;
+}
+
+/**
+ * Reads the vault's own view of a collateral asset. This is the authority on
+ * whether an asset is depositable — the client config only nominates
+ * candidates, and an asset absent or inactive here would revert on deposit.
+ */
+export async function getCollateralConfig(
+  assetAddress: string
+): Promise<RawCollateralConfig | null> {
+  const val = await simulateRead(CONTRACTS.vault, "collateral", [addressToScVal(assetAddress)]);
+  if (!val) return null;
+  const { scValToNative } = await import("@stellar/stellar-sdk");
+  const native = scValToNative(val) as Record<string, unknown> | null;
+  if (!native) return null;
+  return {
+    oracleSymbol: String(native["oracle_asset"] ?? ""),
+    haircutBps: Number(native["haircut_bps"] ?? 0),
+    active: Boolean(native["active"]),
+  };
+}
+
+/** Per-asset gross deposit cap, or null when uncapped. */
+export async function getDepositCap(assetAddress: string): Promise<bigint | null> {
+  const val = await simulateRead(CONTRACTS.vault, "deposit_cap", [addressToScVal(assetAddress)]);
+  if (!val) return null;
+  const { scValToNative } = await import("@stellar/stellar-sdk");
+  const native = scValToNative(val);
+  return native === null || native === undefined ? null : BigInt(String(native));
+}
+
+/** Deposits minus withdrawals for an asset — what the cap is measured against. */
+export async function getTotalDeposited(assetAddress: string): Promise<bigint> {
+  const val = await simulateRead(CONTRACTS.vault, "total_deposited", [
+    addressToScVal(assetAddress),
+  ]);
+  return val ? scValToI128(val) : 0n;
+}
+
 export async function getAccountHealth(
   userAddress: string,
   assetAddress: string = ASSETS.usdc

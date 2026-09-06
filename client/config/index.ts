@@ -41,7 +41,13 @@ export {
   getNetworkConfig,
   isNetworkId,
 } from "./networks";
-export type { NetworkId, NetworkConfig, ContractSet, AssetSet } from "./networks";
+export type {
+  NetworkId,
+  NetworkConfig,
+  ContractSet,
+  AssetSet,
+  CollateralAsset,
+} from "./networks";
 
 /** The network this module's flat exports are bound to. See the note above. */
 export const ACTIVE_NETWORK_ID: NetworkId =
@@ -59,6 +65,20 @@ export const NETWORK = {
 export const CONTRACTS = ACTIVE.contracts;
 
 export const ASSETS = ACTIVE.assets;
+
+/**
+ * Assets the vault may accept as margin. This is the *candidate* list; call
+ * `listVaultCollateral()` in lib/stellar/collateral.ts to narrow it to what the
+ * vault has actually listed and left active on-chain.
+ */
+export const COLLATERAL = ACTIVE.collateral;
+
+/**
+ * The asset PnL, funding and liquidation settle in. Every market quotes in it,
+ * and losses always debit it — other collateral is seized to cover that debit.
+ */
+export const SETTLEMENT_ASSET =
+  ACTIVE.collateral.find((c) => c.settlement) ?? ACTIVE.collateral[0];
 
 export const MARKETS: Record<string, MarketConfig> = {
   "XLM-PERP": {

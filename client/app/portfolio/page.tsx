@@ -5,8 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TopNav } from "@/components/common/TopNav";
 import { useWalletStore } from "@/stores/wallet";
 import { useMarketStore } from "@/stores/market";
-import { getBalance, getAccountHealth, getPositions } from "@/lib/stellar/contracts";
-import { ASSETS } from "@/config";
+import { getAccountHealth, getPositions } from "@/lib/stellar/contracts";
 import { amountToHuman } from "@/lib/format";
 import { calcUnrealizedPnl } from "@/lib/math";
 import { DepositWithdrawDialog } from "@/features/trade/components/DepositWithdrawDialog";
@@ -14,7 +13,8 @@ import { PositionsTable } from "@/features/trade/components/PositionsTable";
 import { OpenOrdersTable } from "@/features/trade/components/OpenOrdersTable";
 import { OrderHistoryTable } from "@/features/trade/components/OrderHistoryTable";
 import { TradeHistoryTable } from "@/features/trade/components/TradeHistoryTable";
-import { UsdcLogo } from "@/components/common/AssetLogos";
+import { useCollateral } from "@/features/collateral/useCollateral";
+import { AssetLogo } from "@/components/common/AssetLogos";
 import { apiFetch } from "@/lib/api";
 
 const TABS = [
@@ -33,12 +33,6 @@ export default function PortfolioPage() {
   const [tab, setTab] = useState<Tab>("Positions");
   const markPrices = useMarketStore((s) => s.markPrices);
 
-  const { data: balance } = useQuery({
-    queryKey: ["balance", address],
-    queryFn: () => getBalance(address!, ASSETS.usdc),
-    enabled: !!address && connected,
-    refetchInterval: 10_000,
-  });
   const { data: health } = useQuery({
     queryKey: ["health", address],
     queryFn: () => getAccountHealth(address!),
@@ -75,7 +69,6 @@ export default function PortfolioPage() {
   });
 
   const equity = health ? amountToHuman(health.equity) : 0;
-  const usdcBal = balance !== undefined ? amountToHuman(balance) : 0;
   const unrealizedPnl = positions.reduce((acc, p) => {
     const mp = markPrices[p.marketId];
     return mp ? acc + amountToHuman(calcUnrealizedPnl(p.isLong, p.size, p.entryPrice, mp)) : acc;
@@ -132,7 +125,7 @@ export default function PortfolioPage() {
             <Card>
               <Label>Total Equity</Label>
               <div className="mt-2 text-[30px] font-semibold tabular">{usd(equity)}</div>
-              <div className="mt-3 text-[13px] text-[#a3a3a3]">USDC Balance: {usd(usdcBal)}</div>
+              <CollateralBreakdown address={address} />
             </Card>
             <Card>
               <div className="flex items-center justify-between">
@@ -207,7 +200,7 @@ export default function PortfolioPage() {
             {tab === "Open Orders" && <OpenOrdersTable marketFilter="all" sideFilter="both" />}
             {tab === "Order History" && <OrderHistoryTable marketFilter="all" sideFilter="both" />}
             {tab === "Trade History" && <TradeHistoryTable marketFilter="all" />}
-            {tab === "Balances" && <BalancesTab connected={connected} usdcBal={usdcBal} balanceLoaded={balance !== undefined} />}
+            {tab === "Balances" && <BalancesTab connected={connected} address={address} />}
           </div>
         </div>
       </main>
@@ -306,28 +299,84 @@ function ChartEmpty({ text }: { text: string }) {
   );
 }
 
-function BalancesTab({ connected, usdcBal, balanceLoaded }: { connected: boolean; usdcBal: number; balanceLoaded: boolean }) {
+/**
+ * What the equity number is actually made of. With one collateral asset this is
+ * a formality; with several it is the difference between a trader understanding
+ * their margin and guessing at it.
+ */
+function CollateralBreakdown({ address }: { address: string | null }) {
+  const { data: positions } = useCollateral(address);
+  const held = (positions ?? []).filter((p) => p.raw !== 0n);
+  if (held.length === 0) return null;
+
+  return (
+    <div className="mt-3 flex flex-col gap-1.5">
+      {held.map((p) => (
+        <div key={p.code} className="flex items-center justify-between text-[13px]">
+          <span className="inline-flex items-center gap-1.5 text-[#a3a3a3]">
+            <AssetLogo symbol={p.code} size={13} />
+            {p.code}
+            {p.haircutBps > 0 && (
+              <span className="text-[11px] text-[#737373]">
+                −{(p.haircutBps / 100).toFixed(1)}%
+              </span>
+            )}
+          </span>
+          <span className={`tabular ${p.raw < 0n ? "text-[#f87171]" : "text-[#f5f5f5]"}`}>
+            {usd(p.marginValue)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BalancesTab({ connected, address }: { connected: boolean; address: string | null }) {
+  const { data: positions, isLoading } = useCollateral(address);
+
   if (!connected) return <Empty text="Connect a wallet to view balances" />;
+  if (isLoading || !positions) return <Empty text="Loading balances…" />;
+
   return (
     <table className="w-full text-[12px] tabular">
       <thead>
         <tr className="text-[10px] text-[#737373] font-semibold uppercase tracking-wider">
           <th className="pl-4 pr-2 py-[9px] text-left">Coin</th>
-          <th className="px-3 py-[9px] text-right">Total Balance</th>
-          <th className="pr-4 pl-2 py-[9px] text-right">Available</th>
+          <th className="px-3 py-[9px] text-right">Wallet</th>
+          <th className="px-3 py-[9px] text-right">Vault Balance</th>
+          <th className="px-3 py-[9px] text-right">Price</th>
+          <th className="px-3 py-[9px] text-right">Haircut</th>
+          <th className="pr-4 pl-2 py-[9px] text-right">Margin Value</th>
         </tr>
       </thead>
       <tbody>
-        <tr className="border-t border-[#2A2A31]">
-          <td className="pl-4 pr-2 py-[12px] text-left">
-            <span className="inline-flex items-center gap-2">
-              <UsdcLogo size={16} />
-              <span className="font-semibold text-[#f5f5f5]">USDC</span>
-            </span>
-          </td>
-          <td className="px-3 py-[12px] text-right text-[#f5f5f5]">{balanceLoaded ? usd(usdcBal) : "—"}</td>
-          <td className="pr-4 pl-2 py-[12px] text-right text-[#f5f5f5]">{balanceLoaded ? usd(usdcBal) : "—"}</td>
-        </tr>
+        {positions.map((p) => (
+          <tr key={p.code} className="border-t border-[#2A2A31]">
+            <td className="pl-4 pr-2 py-[12px] text-left">
+              <span className="inline-flex items-center gap-2">
+                <AssetLogo symbol={p.code} size={16} />
+                <span className="font-semibold text-[#f5f5f5]">{p.code}</span>
+                {p.settlement && (
+                  <span className="rounded-full border border-[#334155] px-1.5 py-[1px] text-[9.5px] font-semibold uppercase tracking-wide text-[#a3a3a3]">
+                    Settlement
+                  </span>
+                )}
+              </span>
+            </td>
+            <td className="px-3 py-[12px] text-right text-[#a3a3a3]">{p.walletBalance.toFixed(2)}</td>
+            {/* A negative vault balance is a settlement debit the vault has
+                already paid out. Flagging it explains an equity number that
+                would otherwise look wrong. */}
+            <td className={`px-3 py-[12px] text-right ${p.raw < 0n ? "text-[#f87171]" : "text-[#f5f5f5]"}`}>
+              {p.balance.toFixed(2)}
+            </td>
+            <td className="px-3 py-[12px] text-right text-[#a3a3a3]">${p.price.toFixed(4)}</td>
+            <td className="px-3 py-[12px] text-right text-[#a3a3a3]">
+              {p.haircutBps === 0 ? "—" : `${(p.haircutBps / 100).toFixed(2)}%`}
+            </td>
+            <td className="pr-4 pl-2 py-[12px] text-right text-[#f5f5f5]">{usd(p.marginValue)}</td>
+          </tr>
+        ))}
       </tbody>
     </table>
   );

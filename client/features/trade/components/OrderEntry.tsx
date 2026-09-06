@@ -263,7 +263,7 @@ export function OrderEntry({
       toast.error(orderType === "market" ? "Waiting for a market price" : "Enter a limit price"); return;
     }
     if (sizeInQuote && baseSizeNum <= 0) {
-      toast.error("Waiting for a price to convert USDC size");
+      toast.error("Waiting for a price to convert the order size");
       return;
     }
     if (post && orderType !== "limit") {
@@ -306,7 +306,7 @@ export function OrderEntry({
       const availableHuman = amountToHuman(availableToTrade);
       if (marginRequiredNum > availableHuman) {
         toast.error(
-          `Insufficient balance — $${marginRequiredNum.toFixed(2)} required, $${availableHuman.toFixed(2)} available. Deposit more USDC or reduce size.`
+          `Insufficient balance — $${marginRequiredNum.toFixed(2)} required, $${availableHuman.toFixed(2)} available. Deposit more collateral or reduce size.`
         );
         return;
       }

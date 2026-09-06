@@ -2,53 +2,63 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useWalletStore } from "@/stores/wallet";
-import { getBalance, getAccountHealth } from "@/lib/stellar/contracts";
-import { ASSETS } from "@/config";
-import { formatUsd, amountToHuman } from "@/lib/format";
+import { getAccountHealth } from "@/lib/stellar/contracts";
+import { SETTLEMENT_ASSET } from "@/config";
+import { amountToHuman } from "@/lib/format";
 import { DepositWithdrawDialog } from "./DepositWithdrawDialog";
-import { UsdcLogo } from "@/components/common/AssetLogos";
+import { useCollateral } from "@/features/collateral/useCollateral";
+import { AssetLogo } from "@/components/common/AssetLogos";
 import type { ReactNode } from "react";
 
 export function AccountBar() {
   const { address, connected } = useWalletStore();
 
-  const { data: balance } = useQuery({
-    queryKey: ["balance", address],
-    queryFn: () => getBalance(address!, ASSETS.usdc),
-    enabled: !!address && connected,
-    refetchInterval: 10_000,
-  });
+  const { data: collateral } = useCollateral(connected ? address : null);
 
   const { data: health } = useQuery({
     queryKey: ["health", address],
-    queryFn: () => getAccountHealth(address!, ASSETS.usdc),
+    queryFn: () => getAccountHealth(address!, SETTLEMENT_ASSET.contract),
     enabled: !!address && connected,
     refetchInterval: 10_000,
   });
 
   if (!connected || !address) return null;
 
-  // Free collateral = deposited balance − margin locked by open positions ± unrealized PnL.
-  // Falls back to the raw vault balance before any position exists.
-  const available = health?.freeCollateral ?? balance;
+  // Deposited is the MARGIN value of every collateral asset — oracle value after
+  // each asset's haircut — because that is the number the vault's health
+  // calculation uses. Showing the raw sum would overstate borrowing power for
+  // anyone holding a haircut asset.
+  const deposited = collateral?.reduce((acc, p) => acc + p.marginValue, 0);
+  const held = (collateral ?? []).filter((p) => p.raw !== 0n);
+
+  // Free collateral = deposited − margin locked by open positions ± unrealized
+  // PnL. Falls back to the deposited total before any position exists.
+  const available =
+    health?.freeCollateral !== undefined ? amountToHuman(health.freeCollateral) : deposited;
 
   return (
     <div className="flex items-center justify-between gap-3 px-4 py-[11px] border-b border-[#334155]">
       <div className="flex items-center gap-5">
         <Stat
           label="Deposited"
-          value={balance !== undefined ? formatUsd(balance) : "—"}
-          icon={<UsdcLogo size={12} />}
+          value={deposited !== undefined ? `$${deposited.toFixed(2)}` : "—"}
+          icon={
+            // Stack the marks of what is actually posted, so a multi-collateral
+            // account reads as one at a glance.
+            <span className="flex items-center -space-x-1">
+              {(held.length > 0 ? held : [{ code: SETTLEMENT_ASSET.code }]).map((p) => (
+                <AssetLogo key={p.code} symbol={p.code} size={12} />
+              ))}
+            </span>
+          }
         />
         <Stat
           label="Available"
-          value={available !== undefined ? formatUsd(available) : "—"}
-          icon={<UsdcLogo size={12} />}
+          value={available !== undefined ? `$${available.toFixed(2)}` : "—"}
         />
         <Stat
           label="Used Margin"
-          value={health !== undefined && health !== null ? `$${amountToHuman(health.usedMargin).toFixed(2)}` : "—"}
-          icon={<UsdcLogo size={12} />}
+          value={health ? `$${amountToHuman(health.usedMargin).toFixed(2)}` : "—"}
         />
       </div>
       <DepositWithdrawDialog />

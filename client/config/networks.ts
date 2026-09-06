@@ -59,6 +59,37 @@ export interface AssetSet {
   usdcIssuer: string;
 }
 
+/**
+ * A collateral asset the vault accepts.
+ *
+ * Listing here does NOT make an asset depositable — the vault's own
+ * `set_collateral` does. This registry only tells the client which assets are
+ * worth asking the chain about; `lib/stellar/collateral.ts` reads the vault and
+ * drops anything not actually listed and active, so a config entry can never
+ * present a deposit that would revert.
+ */
+export interface CollateralAsset {
+  /** Ticker shown in the UI. */
+  code: string;
+  /** SAC contract id — what vault deposit/withdraw take as `asset`. */
+  contract: string;
+  /** Classic issuer account. Null for the native XLM wrapper. */
+  issuer: string | null;
+  /** Oracle symbol the vault prices this asset under. */
+  oracleSymbol: string;
+  /** The asset PnL, funding and liquidation settle in. Exactly one is true. */
+  settlement: boolean;
+  /**
+   * Decimals to round withdrawals down to, when the asset bridges out at fewer
+   * decimals than Stellar's 7. USDT0's LayerZero OFT normalises to 6 shared
+   * decimals, so a 7th-decimal remainder cannot be bridged and would strand as
+   * dust. Undefined means no rounding.
+   */
+  bridgeDecimals?: number;
+  /** Short note surfaced in the deposit dialog. */
+  note?: string;
+}
+
 export interface NetworkConfig {
   id: NetworkId;
   /** Human label for chrome: "Stellar Mainnet". */
@@ -71,6 +102,8 @@ export interface NetworkConfig {
   explorerUrl: string;
   contracts: ContractSet;
   assets: AssetSet;
+  /** Assets the vault may accept as margin, settlement asset first. */
+  collateral: readonly CollateralAsset[];
   /**
    * Whether this network is expected to have keepers (oracle/matcher/indexer)
    * running behind it. When false the UI shows a degraded-venue banner rather
@@ -102,30 +135,76 @@ const MAINNET_DEFAULTS = {
     usdc: "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
     usdcIssuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   },
+  collateral: [
+    {
+      code: "USDC",
+      contract: "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      oracleSymbol: "USDC",
+      settlement: true,
+    },
+    {
+      // Tether's USDT0, live on Stellar 2026-09-02. A LayerZero OFT, not a
+      // native Tether issuance, so it carries bridge risk on top of issuer
+      // risk — hence a haircut, set on-chain via set_collateral.
+      // https://developers.stellar.org/docs/tokens/usdt0-layerzero
+      code: "USDT0",
+      contract: "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF",
+      issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+      oracleSymbol: "USDT0",
+      settlement: false,
+      bridgeDecimals: 6,
+      note: "Margin only. PnL settles in USDC.",
+    },
+  ],
 } as const;
 
 const TESTNET_DEFAULTS = {
   rpcUrl: "https://soroban-testnet.stellar.org",
   passphrase: "Test SDF Network ; September 2015",
   horizonUrl: "https://horizon-testnet.stellar.org",
-  // Redeployed 2026-09-05 (kryon-protocol/infra/deploy/testnet-deployment-v2.json)
-  // — the 2026-07-05 admin key was lost, so this is a fresh deployment under a
-  // key the operator controls end-to-end; no governance handover.
+  // Redeployed 2026-09-06 as v3 (infra/deploy/testnet-deployment-v3.json).
+  // The v2 deployment's admin key was lost, so its vault could never be
+  // reconfigured again — no new collateral, no new markets, no guardian, no
+  // admin handover. v3 carries the multi-collateral work AND upgrade() on every
+  // contract, so a change no longer costs a redeploy.
   contracts: {
-    governance: "CA4RGOU5S74EZHG6P5PKKMB5SR7TRXLY7DMJOTLUG6F6XE4P6YZSHH34",
-    oracleAdapter: "CD5NFH3JWGIAPTRD4R5OBBJNMJKR3SEL2WXOXG5SH3YT7Q65VVNUZUI4",
-    vault: "CCFVY4ISEKH5MOOONDDPZXE3ZH7DMEHH7P3GPT5HOZOXD4NMIVPOKK6P",
-    engine: "CAF5OD5KKQOJUW6C3RKSBT2B3U4FZBAO2GM5CN5HQY37FPOL3EHNLF5P",
-    orderGateway: "CDGWXDAFGPARVZ2VRFTDAJK5MIJ326SPBE4UWZF5CD4CQEEKPVIIDARQ",
-    insurance: "CAHX6XS4AUO3BF5JIVIPEW3ZNP7S6FDWZ3KXLW5LAMPEFO57H7IXA7MC",
-    liquidation: "CBQC3MTE5INOJKBWO66TBZ3EVGKQDJCUIBJAEFAABK5X2AKILJYBEMOL",
-    risk: "CDZVGUXWAE5NZSVAQ62NTKJUBBXWJD6OCXBHNYQHYLX4KPWV6AF7PANX",
+    governance: "CDZDUYFCC7PI2AJMNHV3MC2YDE6PAFGUGORSACJECKJHFA3WBJUJARXR",
+    oracleAdapter: "CD554K6KT7ZPJDI2V34EJTTEJECU3VC2HSHD2QJFV2S2L7ABL3RZR2JL",
+    vault: "CBUWQHSJNRFVM5QIBZ4DUZOPJVFJL6VAZWW7S5OE5B7ZO7BZPPOBE334",
+    engine: "CDHZJ2V4BVIE765YV5SXFMKQAIXTIFN4HJ5D5DVHZSHSY6VNTQI5UBSI",
+    orderGateway: "CDR6YWOWWUKUL7IJP54B44N5H6Q3Y6RGWVQ7VQ4UXWRQ2C6FNAQBDVCT",
+    insurance: "CA7TCLZU2GOXXNOBE65EA7QO33NQGQBVHAUPORPUZOJN5W6NLG2RWHO4",
+    liquidation: "CCU44MEY452T5IESCOGETP3OPVSWSXZMPYG6FICE4JLP2R4YSM4UWODG",
+    risk: "CDZNCVMIKW6BPEWCDLJHHLIQM7EBMFC6YOLADBI36ZOICUWDUS2ZAM7B",
   },
   assets: {
     nativeXlm: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
     usdc: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
     usdcIssuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
   },
+  // Real USDT0 is a mainnet-only issuance (its issuer 404s on testnet), so
+  // testnet uses the mock from scripts/deploy-testnet-usdt0.ts. Listed on the
+  // v3 vault at a 500bps haircut; verified on chain 2026-09-06 — 1,000 USDT0
+  // deposited valued at 950 equity.
+  collateral: [
+    {
+      code: "USDC",
+      contract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      oracleSymbol: "USDC",
+      settlement: true,
+    },
+    {
+      code: "USDT0",
+      contract: "CCXWM7LWNT4VDRUJ4KZILV6KB7SXWDWDBF5TT65E5IRDEX7QZTDMNLRO",
+      issuer: "GDEJSYQQOZIUKFZVS4OKWZCH7D3YCGN2NMUGBCNPVQXFX6XN4JRK32ND",
+      oracleSymbol: "USDT0",
+      settlement: false,
+      bridgeDecimals: 6,
+      note: "Margin only. PnL settles in USDC.",
+    },
+  ],
 } as const;
 
 // ─── Env overrides (primary network only) ────────────────────────────────────
@@ -149,6 +228,33 @@ const OVERRIDES = {
   usdcIssuer: process.env.NEXT_PUBLIC_USDC_ISSUER,
 } as const;
 
+// USDT0 is configured separately from OVERRIDES because it is OPTIONAL: unset
+// simply means this deployment does not offer it, which is the correct state
+// for a testnet that has not had a mock issued yet. Putting it in OVERRIDES
+// would trip assertPresentOnPrimaryMainnet and hard-fail mainnet boot on an
+// asset that is legitimately not listed yet.
+const USDT0_OVERRIDE = {
+  contract: process.env.NEXT_PUBLIC_ASSET_USDT0,
+  issuer: process.env.NEXT_PUBLIC_USDT0_ISSUER,
+} as const;
+
+// Per-network override, applied whether or not that network is the primary one.
+// This deployment builds with mainnet primary but serves testnet through the
+// navbar toggle, so a primary-only override can never reach the testnet view —
+// USDT0 would stay invisible there no matter what the vault had listed. Follows
+// the existing NEXT_PUBLIC_*_TESTNET convention (WS_URL, ACTIVE_MARKETS).
+const USDT0_TESTNET_OVERRIDE = {
+  contract: process.env.NEXT_PUBLIC_ASSET_USDT0_TESTNET,
+  issuer: process.env.NEXT_PUBLIC_USDT0_ISSUER_TESTNET,
+} as const;
+
+/** The USDT0 address to use for `id`, or null when this network offers none. */
+function usdt0For(id: NetworkId, primary: boolean) {
+  if (id === "testnet" && USDT0_TESTNET_OVERRIDE.contract) return USDT0_TESTNET_OVERRIDE;
+  if (primary && USDT0_OVERRIDE.contract) return USDT0_OVERRIDE;
+  return null;
+}
+
 /**
  * Mainnet must never silently fall back to a baked address when it is the
  * primary (deployed) network — a wrong vault id there loses real funds. This
@@ -162,6 +268,53 @@ function assertPresentOnPrimaryMainnet(key: string, value: string | undefined): 
 
 for (const [key, value] of Object.entries(OVERRIDES)) {
   assertPresentOnPrimaryMainnet(key, value);
+}
+
+/**
+ * Resolves a network's collateral list.
+ *
+ * The settlement asset honours the NEXT_PUBLIC_ASSET_USDC override so a
+ * redeployed SAC stays consistent with `assets.usdc`.
+ *
+ * USDT0 can also be injected by env. Testnet has no USDT0 issuance of its own,
+ * so a testnet deployment issues a mock (scripts/deploy-testnet-usdt0.ts) and
+ * points NEXT_PUBLIC_ASSET_USDT0 at the resulting SAC. Unset means the network
+ * does not offer USDT0 at all, which is the right default: `listVaultCollateral`
+ * would drop it anyway, but not asking the chain about a placeholder address is
+ * cleaner than relying on that.
+ */
+function buildCollateral(
+  id: NetworkId,
+  defaults: readonly CollateralAsset[],
+  pick: (override: string | undefined, fallback: string) => string,
+  primary: boolean
+): readonly CollateralAsset[] {
+  const resolved = defaults.map((c) =>
+    c.settlement
+      ? {
+          ...c,
+          contract: pick(OVERRIDES.usdc, c.contract),
+          issuer: pick(OVERRIDES.usdcIssuer, c.issuer ?? ""),
+        }
+      : c
+  );
+
+  if (resolved.some((c) => c.code === "USDT0")) return resolved;
+  const usdt0 = usdt0For(id, primary);
+  if (!usdt0?.contract) return resolved;
+
+  return [
+    ...resolved,
+    {
+      code: "USDT0",
+      contract: usdt0.contract,
+      issuer: usdt0.issuer ?? null,
+      oracleSymbol: "USDT0",
+      settlement: false,
+      bridgeDecimals: 6,
+      note: "Margin only. PnL settles in USDC.",
+    },
+  ];
 }
 
 function buildNetwork(
@@ -200,6 +353,9 @@ function buildNetwork(
       usdc: pick(OVERRIDES.usdc, defaults.assets.usdc),
       usdcIssuer: pick(OVERRIDES.usdcIssuer, defaults.assets.usdcIssuer),
     },
+    // The settlement asset honours the NEXT_PUBLIC_ASSET_USDC override so a
+    // redeployed SAC stays consistent with `assets.usdc`; the rest are baked.
+    collateral: buildCollateral(id, defaults.collateral, pick, primary),
     // Keepers are wired per network by the operator. `NEXT_PUBLIC_KEEPERS_*`
     // lets a deployment declare which venues are actually live; unset means
     // "only the primary network is live", which is the safe reading.
