@@ -152,6 +152,37 @@ impl PerpLiquidationContract {
         Ok(())
     }
 
+    /// The liquidator's reward, in bps of the closed notional.
+    ///
+    /// Readable because it is the entire economic case for liquidating. A
+    /// testnet drill found this set to 0 on a live deployment: liquidations
+    /// succeeded, closed the position correctly, and paid the liquidator
+    /// nothing. No rational keeper runs at a loss, so liquidation would simply
+    /// never have happened — and with no reader, nothing could tell you that
+    /// from outside.
+    pub fn max_reward_bps(env: Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::MaxRewardBps)
+    }
+
+    /// Retune the liquidator reward.
+    ///
+    /// Previously this could only be set at `initialize`, so a deployment that
+    /// launched with the wrong value — including 0, which disables liquidation
+    /// economics entirely — could never correct it without redeploying the
+    /// contract and rewiring every peer. Capped at the same 1_000 bps that
+    /// `initialize` enforces, so this cannot become a drain on the insurance
+    /// fund.
+    pub fn set_max_reward_bps(env: Env, max_reward_bps: u32) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        if max_reward_bps > 1_000 {
+            return Err(CoreError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxRewardBps, &max_reward_bps);
+        Ok(())
+    }
+
     pub fn liquidate(
         env: Env,
         liquidator: Address,

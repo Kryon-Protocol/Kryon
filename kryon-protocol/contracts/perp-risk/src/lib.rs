@@ -1,5 +1,31 @@
 #![no_std]
 #![deny(unsafe_code)]
+//! Advisory risk views. **Never** a source of truth for moving value.
+//!
+//! Every entrypoint here takes the `AccountSnapshot` as a CALLER-SUPPLIED
+//! ARGUMENT. The contract does not read the vault's balances or the engine's
+//! positions; it computes over whatever the caller hands it. Anyone can
+//! therefore obtain a "healthy" answer for an account that is deeply
+//! underwater, simply by describing a different account.
+//!
+//! That is fine for what this is — a calculator that front-ends and keepers can
+//! use to preview a hypothetical — and catastrophic if anything ever gates a
+//! withdrawal, a trade or a liquidation on its output. The authoritative health
+//! computation is `perp-vault::account_health`, which reads the vault's own
+//! stored balances and positions and cannot be fed a fiction.
+//!
+//! Two further reasons not to wire this in:
+//!
+//! - `set_market` stores a `MarketSnapshot` with an `oracle_price` frozen at
+//!   the moment it was written. Nothing refreshes it, so its answers drift from
+//!   the market with no staleness guard to stop them.
+//! - It has never been configured on any network. `set_market` was never called
+//!   for a single market on testnet or mainnet, so in practice every entrypoint
+//!   returns `InvalidConfig` today (see the note in `client/scripts/add-market.ts`).
+//!
+//! The one genuinely valuable thing in here is `plan_liquidation`, which sizes a
+//! partial liquidation to the minimum that restores health. That logic is now
+//! mirrored in the liquidation keeper, where it can act on authoritative data.
 
 use protocol_core::{AccountSnapshot, CoreError, MarketSnapshot};
 use risk_engine::{
@@ -22,7 +48,10 @@ pub struct PerpRiskContract;
 impl PerpRiskContract {
     pub fn initialize(env: Env, admin: Address) -> Result<(), CoreError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(CoreError::InvalidConfig);
+            // Every other contract in the protocol reports this as
+            // AlreadyInitialized; reporting InvalidConfig here sent a redeploy
+            // script looking for a bad argument instead of an existing install.
+            return Err(CoreError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -73,6 +102,8 @@ impl PerpRiskContract {
         Ok(())
     }
 
+    /// Health for a caller-supplied snapshot. Advisory only — see the module
+    /// docs. Do not gate value movement on this; use `perp-vault::account_health`.
     pub fn get_account_health(
         env: Env,
         account: AccountSnapshot,
