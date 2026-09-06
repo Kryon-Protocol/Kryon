@@ -38,7 +38,7 @@ export function networkFromRequest(req: NextRequest): NetworkId {
  * `apiFetch` always sends the param, so the fast path stays cacheable; this
  * only downgrades direct/param-less callers.
  */
-export function networkIsExplicit(req: NextRequest): boolean {
+function networkIsExplicit(req: NextRequest): boolean {
   return Boolean(req.nextUrl.searchParams.get(NETWORK_PARAM));
 }
 

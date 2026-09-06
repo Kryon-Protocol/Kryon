@@ -49,6 +49,12 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # The unit suite (formatting precision, market config, order-intent
+      # encoding, collateral maths) was defined but never wired into CI, so a
+      # regression in any of it shipped silently.
+      - name: Unit tests
+        run: npm test
+
       - name: Build
         run: npm run build
 

@@ -46,6 +46,14 @@ npm-debug.log*
 # Claude Code local state
 .claude/
 
+# Marketing / pitch collateral — not part of the shipped product
+DEMO-DAY-PITCH.md
+LAUNCH-VIDEO-60S.md
+
+# Local scratch dumps from ad-hoc API pokes
+activity.json
+current_activity.json
+
 # Audit reports (local reference only, not published)
 Audit Reports/
 AUDIT_REPORT.md

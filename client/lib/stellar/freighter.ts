@@ -44,7 +44,7 @@ export async function freighterSignTx(xdr: string): Promise<string> {
   return res.signedTxXdr;
 }
 
-export async function freighterGetNetwork(): Promise<{ passphrase: string } | null> {
+async function freighterGetNetwork(): Promise<{ passphrase: string } | null> {
   try {
     const res = await getNetworkDetails();
     if (res.error) return null;
@@ -70,9 +70,12 @@ export async function freighterSignMessage(message: string, address?: string): P
     : btoa(String.fromCharCode(...new Uint8Array(res.signedMessage)));
 }
 
-export async function isOnTestnet(): Promise<boolean> {
+/**
+ * Whether the wallet is on the network this deployment targets. The name is
+ * network-agnostic on purpose: the same check guards testnet and mainnet, and
+ * the passphrase it compares against comes from the active network config.
+ */
+export async function isOnExpectedNetwork(): Promise<boolean> {
   const net = await freighterGetNetwork();
   return net?.passphrase === NETWORK_PASSPHRASE;
 }
-
-export const isOnExpectedNetwork = isOnTestnet;

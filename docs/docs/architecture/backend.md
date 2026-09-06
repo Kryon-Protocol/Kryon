@@ -77,15 +77,24 @@ The matcher and oracle keeper use **different signing keys**
 (`MATCHER_OPERATOR_SECRET` vs `ORACLE_PUBLISHER_SECRET`). They were originally
 the same account, which caused `tx_bad_seq` sequence-number collisions under
 concurrency. Dedicated keys decouple their transaction streams. See
-[Deployment](/operations/deployment) and the [Stress-Test
-Report](/stress-test-report).
+[Deployment](/operations/deployment).
 
 ## Settlement submission (`lib/stellar/settlement.ts`)
 
-`submitSettleFillDirect` builds, simulates, assembles, signs (operator), and
-submits `settle_fill`, then polls for confirmation. It:
+Two paths, both fee-paid by the matcher operator:
 
-- Retries on `tx_bad_seq` with a fresh account sequence (safe — a rejected tx
-  never executed).
-- Treats confirmation timeout as **terminal** (no resubmit) to avoid
-  double-settlement; the matcher rolls the fill back instead.
+- `submitSettleFillSigned` — the fast path, used when both sides already carry a
+  stored SEP-53 settlement signature. It builds, simulates, assembles, signs
+  (operator), submits `settle_fill_signed`, and polls for confirmation.
+- `simulateSettleFill` — the fallback for orders without stored signatures. It
+  simulates `settle_fill` and returns the resulting auth entries for the maker
+  and taker to sign out of band.
+
+`submitSettleFillSigned` returns a `SettleResult` (`{ hash }` or
+`{ reason }`) rather than a bare `string | null`, so the four distinct
+failures — simulation rejected, submit rejected, tx failed on-chain,
+confirmation timed out — reach the `SettlementJob` row that records them
+instead of collapsing into one opaque message.
+
+Confirmation timeout is **terminal** (no resubmit) to avoid double-settlement;
+the matcher rolls the fill back instead.

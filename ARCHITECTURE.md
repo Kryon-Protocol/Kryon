@@ -541,7 +541,7 @@ Kryon/
 │   ├── services/           # Rust services: matcher · oracle-keeper · indexer-api
 │   │                       #   keepers · monitoring · node-runtime
 │   ├── prisma/schema.prisma# 27 models
-│   ├── e2e/ · testing/     # end-to-end + load/soak/stress harnesses
+│   ├── testing/hardening/  # executable service-level invariant checks
 │   └── infra/
 ├── client/
 │   ├── app/                # Next.js pages + /api routes

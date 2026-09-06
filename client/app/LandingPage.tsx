@@ -4,7 +4,7 @@ import './shift5.css';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useWalletStore } from '@/stores/wallet';
-import { freighterConnect, freighterIsInstalled } from '@/lib/stellar/freighter';
+import { freighterIsInstalled } from '@/lib/stellar/freighter';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { toast } from 'sonner';
 import { ACTIVE_MARKET_SYMBOLS, DEFAULT_MARKET_SYMBOL, NETWORK_LABEL } from '@/config';
@@ -136,7 +136,6 @@ const INITIAL_BINARY: string[] = Array.from({ length: 9 }, (_, i) =>
   `${b8(i * 53 + 11)}  ${b8(i * 97 + 7)}  ${b8(i * 29 + 131)}`,
 );
 const INITIAL_GRAPH_H = 0.5;
-const INITIAL_GRAPH_POINTS: number[] = [12, 28, 18, 33, 9, 24, 30];
 
 function SplitChars({ text, className, delay = 0 }: { text: string; className?: string; delay?: number }) {
   return (
@@ -231,7 +230,6 @@ export function LandingPage() {
   const [binaryRows, setBinaryRows] = useState<string[]>(INITIAL_BINARY);
   const [menuOpen, setMenuOpen] = useState(false);
   const [graphH, setGraphH] = useState(INITIAL_GRAPH_H);
-  const [graphPoints, setGraphPoints] = useState<number[]>(INITIAL_GRAPH_POINTS);
   const [cardIdx, setCardIdx] = useState(CAROUSEL_CLONES);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [ftEmail, setFtEmail] = useState('');
@@ -259,7 +257,6 @@ export function LandingPage() {
   const insightsRef = useRevealRef<HTMLElement>();
   const insightsGridRef = useRef<HTMLDivElement>(null);
   const footerPanelRef = useRef<HTMLDivElement>(null);
-  const ctaRef = useRevealRef();
 
   const activeRealIdx = ((cardIdx - CAROUSEL_CLONES) % SOLUTIONS.length + SOLUTIONS.length) % SOLUTIONS.length;
 
@@ -272,7 +269,6 @@ export function LandingPage() {
     const randomize = () => {
       setBinaryRows(Array.from({ length: 9 }, genBinaryBlock));
       setGraphH(0.25 + Math.random() * 0.65);
-      setGraphPoints(Array.from({ length: 7 }, () => 5 + Math.random() * 35));
     };
     randomize(); // fill in random values after mount (client-only)
     const t = setInterval(randomize, 2200);
@@ -302,7 +298,7 @@ export function LandingPage() {
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', updateSectionHeight);
     };
-  }, []);
+  }, [insightsRef]);
 
   useEffect(() => {
     const panel = footerPanelRef.current;
@@ -384,7 +380,6 @@ export function LandingPage() {
 
   const featured = INSIGHTS[0]!;
   const gridInsights = INSIGHTS.slice(1);
-  const graphXs = [0, 16, 33, 50, 66, 83, 100];
 
   return (
     <>

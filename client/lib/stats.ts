@@ -3,6 +3,15 @@
 // the writers take a Neon `sql` client so they work from scripts and routes.
 //
 // Precision: prices are 1e18, sizes/amounts are 1e7, monetary results are 1e7.
+//
+// NOT CURRENTLY WIRED. `recordFillPnl` is the only producer of `PnlEvent` rows
+// anywhere in the repo, and nothing calls it — so the realized-PnL, fee and
+// win/loss columns that `scripts/stats-aggregator.ts` reads out of `PnlEvent`
+// are permanently zero on the leaderboard and portfolio pages. This file is
+// kept deliberately: it is the intended implementation, and deleting it would
+// only make the gap harder to close. Wiring it into the matcher's settlement
+// path writes financial rows on every fill, so it is a deliberate change, not
+// a cleanup.
 
 import { NETWORK, PRICE_PRECISION } from "@/config";
 

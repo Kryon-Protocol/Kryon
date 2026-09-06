@@ -425,7 +425,7 @@ async function executeSettlement(sql: Sql, match: MatchResult): Promise<boolean>
 
   // C2 fast path: both parties have stored settlement signatures — submit directly.
   if (match.maker.signature && match.taker.signature) {
-    const txHash = await submitSettleFillSigned({
+    const settled = await submitSettleFillSigned({
       maker: {
         owner:      match.maker.owner,
         marketId:   match.maker.marketId,
@@ -454,20 +454,18 @@ async function executeSettlement(sql: Sql, match: MatchResult): Promise<boolean>
       takerSig: match.taker.signature,
     });
 
-    if (txHash) {
-      process.stdout.write(`  ✓ settled signed: ${txHash.slice(0, 12)}...\n`);
+    if (settled.hash) {
+      process.stdout.write(`  ✓ settled signed: ${settled.hash.slice(0, 12)}...\n`);
       await sql`
         INSERT INTO "TxJob" (network, kind, "payloadHash", "unsignedXdr", status, "submittedHash", "nextAttemptAt", "createdAt", "updatedAt")
-        VALUES (${NETWORK_NAME}, 'settle_fill', ${fillHash}, '{}', 'CONFIRMED', ${txHash}, NOW(), NOW(), NOW())
+        VALUES (${NETWORK_NAME}, 'settle_fill', ${fillHash}, '{}', 'CONFIRMED', ${settled.hash}, NOW(), NOW(), NOW())
         ON CONFLICT (network, kind, "payloadHash") DO UPDATE SET status = 'CONFIRMED', "submittedHash" = EXCLUDED."submittedHash", "updatedAt" = NOW()
       `;
       return true;
     }
-    await recordSettlementFailure(
-      sql,
-      fillHash,
-      "submitSettleFillSigned returned no tx hash (signed fast path)"
-    );
+    // The specific reason, not just "returned no tx hash": a job that retries
+    // for hours is useless to debug without it.
+    await recordSettlementFailure(sql, fillHash, `signed fast path: ${settled.reason}`);
     return false;
   }
 

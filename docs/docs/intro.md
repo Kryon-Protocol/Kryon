@@ -27,7 +27,6 @@ written for engineers building on, operating, or auditing the protocol.
 | [APIs](/api/rest) | REST endpoints and the streaming/WebSocket contract |
 | [Operations](/operations/local-dev) | Local dev, environment setup, onboarding, deployment |
 | [Security](/security) & [Scaling](/scaling) | Threat model, trust assumptions, scaling strategy |
-| [Stress-Test Report](/stress-test-report) | Findings and fixes from production hardening |
 | [Mainnet Readiness](/mainnet-readiness) | Honest gap analysis for mainnet launch |
 
 ## Design at a glance

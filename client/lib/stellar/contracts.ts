@@ -32,23 +32,6 @@ export async function getOpenInterest(marketId: number): Promise<{ long: bigint;
   };
 }
 
-export async function getFundingState(marketId: number): Promise<RawFundingState> {
-  const val = await simulateRead(
-    CONTRACTS.engine,
-    "funding_state",
-    [u32ToScVal(marketId)]
-  );
-  if (!val) return { longIndex: 0n, shortIndex: 0n, ratePerHour: 0n, lastUpdated: 0 };
-  const { scValToNative } = await import("@stellar/stellar-sdk");
-  const native = scValToNative(val) as Record<string, unknown>;
-  return {
-    longIndex: BigInt(String(native["long_index"] ?? "0")),
-    shortIndex: BigInt(String(native["short_index"] ?? "0")),
-    ratePerHour: BigInt(String(native["rate_per_hour"] ?? "0")),
-    lastUpdated: Number(native["last_update"] ?? 0),  // contract field is "last_update"
-  };
-}
-
 export async function getBalance(
   userAddress: string,
   assetAddress: string = ASSETS.usdc
@@ -222,13 +205,6 @@ export interface RawPosition {
   margin: bigint;
   isLong: boolean;
   lastFundingIndex: bigint;
-}
-
-export interface RawFundingState {
-  longIndex: bigint;
-  shortIndex: bigint;
-  ratePerHour: bigint;  // 1e18 precision — actual hourly rate
-  lastUpdated: number;
 }
 
 export interface RawAccountHealth {

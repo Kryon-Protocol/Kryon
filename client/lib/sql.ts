@@ -99,7 +99,7 @@ function getPool(url: string): Pool {
   // A pool that emits 'error' with no listener crashes the process — these are
   // idle-client errors (server restart, network blip); the pool reconnects.
   pool.on("error", (err) => {
-    console.error(`  ⚠ pg pool: ${err.message}`);
+    console.error(`pg pool error: ${err.message}`);
   });
   pools.set(url, pool);
   return pool;
@@ -179,9 +179,3 @@ export const neonConfig: Record<string, unknown> = new Proxy(
     },
   }
 );
-
-/** Close every pool — for scripts that need a clean exit. */
-export async function closeAllPools(): Promise<void> {
-  await Promise.all([...pools.values()].map((p) => p.end().catch(() => undefined)));
-  pools.clear();
-}

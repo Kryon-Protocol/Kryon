@@ -100,7 +100,7 @@ export function OrderEntry({
   side?: "buy" | "sell";
   setSide?: (v: "buy" | "sell") => void;
 }) {
-  const { address, connected, connecting, wrongNetwork, setAddress, setConnected, setConnecting, setWrongNetwork } =
+  const { address, connected, connecting, setAddress, setConnected, setConnecting, setWrongNetwork } =
     useWalletStore();
   const queryClient = useQueryClient();
   const addOrder = useLocalOrders((s) => s.addOrder);

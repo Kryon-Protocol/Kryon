@@ -35,7 +35,6 @@ docs/
     ├── operations/        # local-dev, env-setup, onboarding, deployment
     ├── security.md
     ├── scaling.md
-    ├── stress-test-report.md
     └── mainnet-readiness.md
 ```
 

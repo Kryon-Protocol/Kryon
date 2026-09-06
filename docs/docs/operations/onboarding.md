@@ -32,7 +32,7 @@ A path for a new engineer to get productive on Kryon.
 | Change matching/settlement | `client/scripts/matcher-service.ts`, `client/lib/stellar/settlement.ts` |
 | Add validation / API behaviour | `client/app/api/**`, `client/lib/validation.ts` |
 | Touch contracts | `kryon-protocol/contracts/**`, `crates/**` |
-| PnL / margin / liq math | `client/lib/math.ts`, `client/lib/stats.ts` |
+| PnL / margin / liq math | `client/lib/math.ts`, `kryon-protocol/crates/risk-engine/` |
 | Leaderboard / portfolio | `scripts/stats-aggregator.ts`, `app/api/leaderboard`, `app/api/portfolio` |
 | Frontend trade UI | `client/features/trade/components/**` |
 | DB schema | `kryon-protocol/prisma/schema.prisma` |

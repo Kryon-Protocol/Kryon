@@ -66,14 +66,14 @@ export function assertRequiredSecrets(required: string[]): void {
 
   if (missing.length > 0) {
     for (const key of missing) {
-      process.stderr.write(`❌  Missing required env var: ${key}\n`);
+      process.stderr.write(`FATAL: missing required env var ${key}\n`);
     }
     process.stderr.write(`\nSet the above variables in .env.local (local) or Railway Secrets (production).\n`);
     process.exit(1);
   }
 
   if (suspicious.length > 0) {
-    process.stderr.write(`\n⚠️  Secrets warning:\n`);
+    process.stderr.write(`\nWARNING: secrets check\n`);
     for (const msg of suspicious) {
       process.stderr.write(`   ${msg}\n`);
     }
@@ -96,7 +96,7 @@ export function assertNoPublicSecretLeak(): void {
   }
   if (leaks.length > 0) {
     for (const key of leaks) {
-      process.stderr.write(`❌  Secret exposed as public env var: ${key}\n`);
+      process.stderr.write(`FATAL: secret exposed as a public env var: ${key}\n`);
     }
     process.exit(1);
   }

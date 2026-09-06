@@ -172,10 +172,6 @@ export function wsUnsubscribe(marketId: number) {
   send({ type: "unsubscribe", channels });
 }
 
-export function wsIsConnected(): boolean {
-  return ws?.readyState === WebSocket.OPEN;
-}
-
 export function wsDisconnect() {
   isDestroyed = true;
   stopPing();

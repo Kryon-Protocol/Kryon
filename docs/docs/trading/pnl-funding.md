@@ -34,8 +34,16 @@ short close: realized = closeSize · (entry − exit) / 1e18
 ```
 
 Only the closing portion realizes PnL; any residual that opens/increases a
-position realizes nothing. The matcher captures the pre-settlement position to
-compute this, then writes a `PnlEvent(REALIZED_TRADE)` plus a `PnlEvent(FEE)`.
+position realizes nothing.
+
+:::caution Not yet recorded
+`recordFillPnl` is the only writer of `PnlEvent` rows and is not yet called from
+the matcher's settlement path, so no `REALIZED_TRADE` or `FEE` rows are
+produced. The realized-PnL, fees and win/loss figures that
+`scripts/stats-aggregator.ts` derives from `PnlEvent` therefore read as zero on
+the leaderboard and portfolio pages. Unrealized PnL, positions, fills and volume
+are unaffected — they come from `Fill` and on-chain position state.
+:::
 
 ### Example
 

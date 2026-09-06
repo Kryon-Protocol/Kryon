@@ -21,7 +21,7 @@ export async function simulate(
   return server.simulateTransaction(tx);
 }
 
-export async function buildContractCall(
+async function buildContractCall(
   contractId: string,
   method: string,
   args: xdr.ScVal[],

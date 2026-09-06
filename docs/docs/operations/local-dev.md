@@ -26,8 +26,6 @@ Required env vars (`client/.env.local`):
 
 ```bash
 DATABASE_URL="postgresql://…"
-NEXT_PUBLIC_INDEXER_URL=http://localhost:3000/api
-NEXT_PUBLIC_MATCHER_URL=http://localhost:3000/api
 ORACLE_PUBLISHER_SECRET=S…   # oracle keeper signer
 MATCHER_OPERATOR_SECRET=S…   # gateway operator signer (distinct key)
 # NEXT_PUBLIC_WS_URL=        # leave unset → polling

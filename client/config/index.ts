@@ -260,7 +260,7 @@ export const MARKETS: Record<string, MarketConfig> = {
 
 // The intended production set. A missing NEXT_PUBLIC_ACTIVE_MARKETS must not
 // silently collapse the venue to a single market (it did until 2026-08-22).
-export const DEFAULT_ACTIVE_MARKETS = Object.keys(MARKETS).join(",");
+const DEFAULT_ACTIVE_MARKETS = Object.keys(MARKETS).join(",");
 
 function parseActiveMarketSymbols(raw: string | undefined): string[] {
   const symbols = (raw ?? DEFAULT_ACTIVE_MARKETS)
@@ -302,7 +302,6 @@ export const ACTIVE_MARKETS: Record<string, MarketConfig> = Object.fromEntries(
   ACTIVE_MARKET_SYMBOLS.map((symbol) => [symbol, MARKETS[symbol]])
 );
 export const DEFAULT_MARKET_SYMBOL = ACTIVE_MARKET_SYMBOLS[0];
-export const DEFAULT_MARKET = ACTIVE_MARKETS[DEFAULT_MARKET_SYMBOL];
 
 export interface MarketConfig {
   marketId: number;
@@ -356,12 +355,6 @@ export const BPS_PRECISION = 10000;
 // only tail one database), so it DOES need a per-network address. The testnet
 // var is optional: unset simply means the UI falls back to REST polling for
 // testnet, which is the same graceful degradation mainnet already had.
-
-export const MATCHER_URL =
-  process.env.NEXT_PUBLIC_MATCHER_URL ?? "";
-
-export const INDEXER_URL =
-  process.env.NEXT_PUBLIC_INDEXER_URL ?? "";
 
 // The legacy single-network `NEXT_PUBLIC_WS_URL` belongs to whichever network
 // the deployment was built for — inheriting it into the other one would point

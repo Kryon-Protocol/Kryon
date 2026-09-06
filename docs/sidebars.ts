@@ -62,7 +62,6 @@ const sidebars: SidebarsConfig = {
     },
     "security",
     "scaling",
-    "stress-test-report",
     "mainnet-readiness",
   ],
 };

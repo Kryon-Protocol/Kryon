@@ -163,7 +163,7 @@ Addresses are mirrored in `client/config/index.ts` and can be overridden via `NE
 
 ```bash
 cd client
-bun install
+npm install
 ```
 
 Create `client/.env` (Next.js) **and** `client/.env.local` (off-chain scripts read this):
@@ -174,7 +174,7 @@ ORACLE_PUBLISHER_SECRET="S…"                                 # authorized orac
 ```
 
 ```bash
-bun run dev        # http://localhost:3000  →  /trade/XLM-PERP
+npm run dev        # http://localhost:3000  →  /trade/XLM-PERP
 ```
 
 Order and market data flows through the app's own same-origin `/api` routes — no separate matcher/indexer URL is needed.
@@ -182,12 +182,12 @@ Order and market data flows through the app's own same-origin `/api` routes — 
 ### 2. Run the off-chain services (live prices & fills)
 
 ```bash
-bun run dev:oracle       # publish XLM price on-chain (~8s cadence)
-bun run dev:matcher      # match orders + settle fills on-chain
-bun run dev:indexer      # sync on-chain state → DB
-bun run dev:ws           # WebSocket server (orderbook + trades)
-bun run dev:reconciler   # recover stuck settlement transactions
-bun run dev:liquidator   # liquidate underwater positions + contract TTL keepalive
+npm run dev:oracle       # publish XLM price on-chain (~8s cadence)
+npm run dev:matcher      # match orders + settle fills on-chain
+npm run dev:indexer      # sync on-chain state → DB
+npm run dev:ws           # WebSocket server (orderbook + trades)
+npm run dev:reconciler   # recover stuck settlement transactions
+npm run dev:liquidator   # liquidate underwater positions + contract TTL keepalive
 ```
 
 A PM2 ecosystem file (`client/ecosystem.config.cjs`) and Docker Compose / Render configs are provided for running the service fleet in the cloud.
@@ -220,14 +220,17 @@ REST endpoints are Next.js route handlers under `client/app/api/**`: `orders` (s
 | Suite | Command | Coverage |
 | --- | --- | --- |
 | Protocol unit + invariants | `cargo test --workspace` | Math, risk engine, contracts, matcher determinism |
-| E2E (testnet) | `bun run dev:e2e` | Deposit → order → match → settle → position → close |
-| Load test | `bun run dev:load` | All API endpoints under load |
-| Failure recovery | `bun run dev:recovery` | Service crash / stuck-tx / reorg scenarios |
-| Soak test | `SOAK_MINUTES=3 bun run dev:soak` | Sustained trading cycles |
-| Production gate | `bun run production:gate` | Config completeness before deploy |
-| Live gate | `bun run production:live-gate` | Live deployment health validation |
+| Client unit | `npm test` | Price/size precision, market config, order-intent encoding, collateral maths |
+| Production gate | `npm run production:gate` | Config completeness before deploy |
+| Live gate | `npm run production:live-gate` | Live deployment health validation |
 
-Additional harnesses live in `kryon-protocol/testing/`: stateful solvency invariants, fuzz targets, hardening checks (deterministic replay, keeper/monitor agreement), and load/chaos simulations.
+`kryon-protocol/testing/hardening` carries the executable service-level
+invariant checks (deterministic replay, keeper/monitor agreement).
+
+End-to-end, load, soak and failure-recovery harnesses drive live testnet and
+mainnet deployments with real keys and real orders. They are operator tooling,
+not part of the shipped product, and are deliberately excluded from this
+repository.
 
 ## CI/CD
 
@@ -293,7 +296,7 @@ The full threat model and trust assumptions are documented in [Security](https:/
 
 ## Documentation
 
-The complete engineering reference — architecture, trade lifecycle, PnL & funding math, database schema, REST/WebSocket APIs, runbooks, stress-test report, and mainnet-readiness analysis — is built with Docusaurus from [`docs/`](docs/) and served at [/docs](https://kryonprotocol.vercel.app/docs) on the live deployment.
+The complete engineering reference — architecture, trade lifecycle, PnL & funding math, database schema, REST/WebSocket APIs, runbooks, and mainnet-readiness analysis — is built with Docusaurus from [`docs/`](docs/) and served at [/docs](https://kryonprotocol.vercel.app/docs) on the live deployment.
 
 ```bash
 cd docs && npm install && npm start   # local docs at http://localhost:3000
@@ -301,7 +304,7 @@ cd docs && npm install && npm start   # local docs at http://localhost:3000
 
 ## Status & roadmap
 
-Kryon is **live on Stellar mainnet** as of 2026-07-07 — all eight contracts deployed and wired, the `XLM-PERP` market configured (10× leverage, guardian pause armed, $500 USDC deposit cap while ramping), and the frontend, matcher, oracle keeper, indexer, and liquidation keeper all running against production. The full suite (E2E, load, soak, failure-recovery, and production-gate) is validated on testnet as part of every release; a mainnet tiny-trade E2E drill is the last item before the deposit cap is lifted. Admin authority is transferring to the `perp-governance` timelock (48h delay) as the final hardening step — see the [mainnet-readiness checklist](https://kryonprotocol.vercel.app/docs/mainnet-readiness) for the full launch runbook.
+Kryon is **live on Stellar mainnet** as of 2026-07-07 — all eight contracts deployed and wired, the `XLM-PERP` market configured (10× leverage, guardian pause armed, $500 USDC deposit cap while ramping), and the frontend, matcher, oracle keeper, indexer, and liquidation keeper all running against production. The full release suite is validated on testnet before every release; a mainnet tiny-trade E2E drill is the last item before the deposit cap is lifted. Admin authority is transferring to the `perp-governance` timelock (48h delay) as the final hardening step — see the [mainnet-readiness checklist](https://kryonprotocol.vercel.app/docs/mainnet-readiness) for the full launch runbook.
 
 ---
 

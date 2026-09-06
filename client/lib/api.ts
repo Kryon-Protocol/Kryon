@@ -21,7 +21,7 @@ import { ACTIVE_NETWORK_ID } from "@/config";
 import { NETWORK_PARAM } from "@/lib/network-resolve";
 import type { NetworkId } from "@/config/networks";
 
-export function withNetwork(path: string, network: NetworkId = ACTIVE_NETWORK_ID): string {
+function withNetwork(path: string, network: NetworkId = ACTIVE_NETWORK_ID): string {
   // Relative paths only; `URL` needs a base, and callers pass "/api/...".
   const [pathname, query = ""] = path.split("?");
   const params = new URLSearchParams(query);

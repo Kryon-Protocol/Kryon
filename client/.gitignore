@@ -64,3 +64,21 @@ _loadtest_*
 _scratch_*
 _tmp_*.mjs
 _tmp_*.ts
+
+# Test, load-test and one-off repair scripts. These drive the LIVE testnet and
+# mainnet deployments with real keys and real orders; they are operator scratch
+# work, not part of the product, and must not ship in the public repo.
+scripts/load-test.ts
+scripts/soak-test.ts
+scripts/stress-test.ts
+scripts/failure-recovery-test.ts
+scripts/e2e-testnet.ts
+scripts/test-*.ts
+scripts/diag-*.ts
+scripts/faucet-*.ts
+scripts/cutover-*.ts
+scripts/redeploy-engine-xlm.ts
+scripts/check-vault-balance.ts
+scripts/migrate-add-order-signature.ts
+scripts/setup-usdc-trustline.ts
+scripts/setup-usdc-settlement.ts

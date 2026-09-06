@@ -25,10 +25,7 @@ contracts/
   perp-vault/      SEP-41 collateral custody with risk-gated withdrawals
 
 testing/
-  invariants/      Stateful solvency and accounting invariant test plans
-  fuzz/            Fuzz targets and corpus notes
   hardening/       Executable service-level invariant checks
-  load-chaos/      Replay load and failure-mode simulations
 
 infra/
   deploy/          Deployment manifests and upgrade governance runbooks

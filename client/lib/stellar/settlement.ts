@@ -214,6 +214,18 @@ function bytesN64Val(sig: string): xdr.ScVal {
   return xdr.ScVal.scvBytes(buf);
 }
 
+/**
+ * Outcome of a settle_fill_signed submission.
+ *
+ * Four very different failures — simulation rejected, submit rejected, tx
+ * failed on-chain, confirmation timed out — used to collapse into a bare
+ * `null`, so a job that retried 48 times carried no record of what was actually
+ * wrong. `reason` is non-null exactly when `hash` is null.
+ */
+export type SettleResult =
+  | { hash: string; reason: null }
+  | { hash: null; reason: string };
+
 export async function submitSettleFillSigned(fill: {
   maker: Parameters<typeof orderToScVal>[0];
   taker: Parameters<typeof orderToScVal>[0];
@@ -223,7 +235,7 @@ export async function submitSettleFillSigned(fill: {
   feePayerSecret: string;
   makerSig: string;
   takerSig: string;
-}): Promise<string | null> {
+}): Promise<SettleResult> {
   try {
     const server = new sorobanRpc.Server(NETWORK.rpcUrl);
     const feeKp = Keypair.fromSecret(fill.feePayerSecret);
@@ -241,8 +253,9 @@ export async function submitSettleFillSigned(fill: {
 
     const sim = await server.simulateTransaction(tx);
     if (sorobanRpc.Api.isSimulationError(sim)) {
-      console.error("settle_fill_signed sim error:", (sim as sorobanRpc.Api.SimulateTransactionErrorResponse).error?.slice(0, 200));
-      return null;
+      const detail = (sim as sorobanRpc.Api.SimulateTransactionErrorResponse).error?.slice(0, 200);
+      console.error("settle_fill_signed sim error:", detail);
+      return { hash: null, reason: `simulation failed: ${detail ?? "unknown"}` };
     }
 
     const prepared = sorobanRpc.assembleTransaction(tx, sim).build();
@@ -250,23 +263,28 @@ export async function submitSettleFillSigned(fill: {
 
     const send = await server.sendTransaction(prepared);
     if (send.status === "ERROR") {
-      console.error("settle_fill_signed submit error");
-      return null;
+      const detail = JSON.stringify(send.errorResult ?? "").slice(0, 200);
+      console.error("settle_fill_signed submit error", detail);
+      return { hash: null, reason: `submit rejected: ${detail}` };
     }
 
     // Poll for confirmation
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       const poll = await server.getTransaction(send.hash);
-      if (poll.status === "SUCCESS") return send.hash;
+      if (poll.status === "SUCCESS") return { hash: send.hash, reason: null };
       if (poll.status === "FAILED") {
         console.error("settle_fill_signed tx failed");
-        return null;
+        return { hash: null, reason: `tx failed on-chain: ${send.hash}` };
       }
     }
-    return null;
+    // Ran out of polls. The transaction may still confirm later, so the hash
+    // belongs in the reason: a retry that re-submits an already-consumed nonce
+    // fails for a completely different reason and would otherwise hide this one.
+    return { hash: null, reason: `confirmation timed out after 60s, hash ${send.hash}` };
   } catch (e) {
-    console.error("submitSettleFillSigned error:", (e as Error).message?.slice(0, 200));
-    return null;
+    const detail = (e as Error).message?.slice(0, 200);
+    console.error("submitSettleFillSigned error:", detail);
+    return { hash: null, reason: `threw: ${detail}` };
   }
 }

@@ -15,8 +15,6 @@ precision) live in `client/config/index.ts`.
 | Variable | Scope | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | server | Neon Postgres connection (pooled, `sslmode=require`) |
-| `NEXT_PUBLIC_INDEXER_URL` | client | Base URL for indexer-backed reads (same-origin `/api`) |
-| `NEXT_PUBLIC_MATCHER_URL` | client | Base URL for matcher-backed reads (same-origin `/api`) |
 | `ORACLE_PUBLISHER_SECRET` | server | Stellar secret of the authorised oracle publisher |
 | `MATCHER_OPERATOR_SECRET` | server | Stellar secret of the gateway operator (settlement signer) — **distinct** from the oracle key |
 | `NEXT_PUBLIC_WS_URL` | client | Optional. Streaming server URL; unset → REST polling |

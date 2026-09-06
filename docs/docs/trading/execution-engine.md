@@ -39,14 +39,16 @@ partial-fill accounting:
 
 ```
 match → persistFill (DB, idempotent)
-      → read maker & taker positions (pre-state, for realized PnL)
-      → submitSettleFillDirect (operator-signed settle_fill)
+      → submitSettleFillSigned (operator fee-payer, stored maker/taker sigs)
             ├─ simulate → assemble → sign → send → poll
-            ├─ tx_bad_seq → retry with fresh sequence (safe)
-            └─ timeout → terminal error (no resubmit; avoid double-settle)
-      → success: recordFillPnl (REALIZED_TRADE + FEE events)
+            └─ any failure → SettleResult.reason (recorded verbatim)
+      → success: mark the settle_fill TxJob CONFIRMED
       → failure: rollbackFill (orders return to book)
 ```
+
+Orders without stored settlement signatures take the fallback path instead:
+`simulateSettleFill` returns auth entries for the maker and taker to sign, and
+the fill is queued until both signatures arrive.
 
 ### Idempotency & consistency
 
@@ -69,8 +71,7 @@ pass on-chain validation.
 
 The operator key is **dedicated** (separate from the oracle keeper). Earlier,
 sharing a key caused `tx_bad_seq` and dropped settlements (surfacing as
-"confirmation timeout"). `submitSettleFillDirect` additionally retries
-`tx_bad_seq` up to 5× with a refreshed sequence.
+"confirmation timeout").
 
 ## Throughput characteristics
 
