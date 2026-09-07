@@ -56,17 +56,37 @@ interface Trade {
 
 const subscriptions = new Map<string, Set<WebSocket>>();
 
+/** Every channel this server will ever publish on. */
+const VALID_CHANNELS = new Set(
+  MARKETS.flatMap((id) => [`orderbook:${id}`, `trades:${id}`])
+);
+
 function subscribe(ws: WebSocket, channel: string) {
   if (!subscriptions.has(channel)) subscriptions.set(channel, new Set());
   subscriptions.get(channel)!.add(ws);
 }
 
+/**
+ * Drop the socket, and drop the channel entirely once nobody is left on it.
+ *
+ * Leaving the empty Set behind leaked a map entry per channel name for the
+ * lifetime of the process — permanently, since nothing ever pruned them.
+ * Harmless while channel names are bounded, which they now are, but the
+ * previous `\d+` match let one client mint unbounded distinct channels and
+ * never give the memory back.
+ */
 function unsubscribe(ws: WebSocket, channel: string) {
-  subscriptions.get(channel)?.delete(ws);
+  const sockets = subscriptions.get(channel);
+  if (!sockets) return;
+  sockets.delete(ws);
+  if (sockets.size === 0) subscriptions.delete(channel);
 }
 
 function unsubscribeAll(ws: WebSocket) {
-  for (const sockets of subscriptions.values()) sockets.delete(ws);
+  for (const [channel, sockets] of subscriptions) {
+    sockets.delete(ws);
+    if (sockets.size === 0) subscriptions.delete(channel);
+  }
 }
 
 function broadcast(channel: string, payload: object) {
@@ -181,7 +201,10 @@ async function broadcastMarket(marketId: number) {
 
 // ── Server setup ──────────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: PORT });
+// maxPayload: this endpoint is public and unauthenticated, and every message it
+// accepts is a small JSON control frame. The `ws` default is 100MB, so without
+// a cap a single client can make the process allocate that much per frame.
+const wss = new WebSocketServer({ port: PORT, maxPayload: 16 * 1024 });
 
 wss.on("connection", (ws) => {
   ws.on("message", (raw) => {
@@ -190,7 +213,14 @@ wss.on("connection", (ws) => {
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
       } else if (msg.type === "subscribe" && Array.isArray(msg.channels)) {
-        const valid = msg.channels.filter((c) => /^(orderbook|trades):\d+$/.test(c));
+        // Match against the channels this server actually publishes, not a
+        // shape. `\d+` accepted `orderbook:99999999` for a market that does not
+        // exist: the subscription was recorded, nothing was ever broadcast to
+        // it, and the entry sat in the map — so an unauthenticated client could
+        // grow that map without bound.
+        const valid = msg.channels.filter(
+          (c) => typeof c === "string" && VALID_CHANNELS.has(c)
+        );
         valid.forEach((c) => subscribe(ws, c));
         ws.send(JSON.stringify({ type: "subscribed", channels: valid }));
       } else if (msg.type === "unsubscribe" && Array.isArray(msg.channels)) {
