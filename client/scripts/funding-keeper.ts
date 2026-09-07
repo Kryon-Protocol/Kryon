@@ -40,7 +40,9 @@ import {
   Keypair,
   Contract,
   TransactionBuilder,
+  Account,
   nativeToScVal,
+  scValToNative,
   rpc as sorobanRpc,
 } from "@stellar/stellar-sdk";
 import { ACTIVE_MARKETS, CONTRACTS, NETWORK } from "../config";
@@ -64,26 +66,62 @@ const MARKETS = Object.values(ACTIVE_MARKETS).map((m) => ({
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// A read-only account for simulate-only calls; sequence is irrelevant since
+// these never submit.
+const READ_KP = Keypair.random();
+
+/** Read `funding_state(market_id).last_update`, or null if unreadable. */
+async function readLastUpdate(server: sorobanRpc.Server, marketId: number): Promise<number | null> {
+  const tx = new TransactionBuilder(new Account(READ_KP.publicKey(), "0"), {
+    fee: "100",
+    networkPassphrase: NETWORK.passphrase,
+  })
+    .addOperation(
+      new Contract(CONTRACTS.engine).call("funding_state", nativeToScVal(marketId, { type: "u32" }))
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await server.simulateTransaction(tx);
+  if (sorobanRpc.Api.isSimulationError(sim)) return null;
+  const retval = (sim as sorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!retval) return null;
+  try {
+    const state = scValToNative(retval) as Record<string, unknown>;
+    return Number(state["last_update"] ?? 0);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Submit one `update_funding` and wait for it to land. Returns the tx hash on
- * confirmed success, or null when the market declined the update for an
- * expected reason (stale oracle, unconfigured funding, or an ambiguous
- * confirmation timeout) — those are logged, not thrown, so one bad market
- * cannot stop the other seven from funding.
+ * Submit one `update_funding` and confirm it actually changed on-chain state.
+ * Returns the tx hash on confirmed success, or null when the market declined
+ * the update for an expected reason (stale oracle, unconfigured funding, or
+ * a confirmation that never materialised) — those are logged, not thrown, so
+ * one bad market cannot stop the other seven from funding.
  *
- * Waiting for confirmation (rather than just staggering submissions) matters
- * because every market shares one account: `getAccount` returns the
- * on-chain sequence, so submitting the next market's tx before this one has
- * landed hands it a stale sequence number. A short stagger isn't enough on
- * testnet's ~5s ledger close — most submissions after the first silently
- * never land, and the one after that gets an explicit txBadSeq. This is the
- * same reason oracle-keeper's `writePrice` polls before moving on.
+ * Two things share one keeper account, so both matter here:
+ *
+ * 1. Waiting for confirmation (rather than just staggering submissions)
+ *    before moving to the next market: `getAccount` returns the on-chain
+ *    sequence, so submitting the next market's tx before this one has landed
+ *    hands it a stale sequence number that collides with (and can silently
+ *    evict, per Stellar's tx-queue replacement rule) whichever tx is still
+ *    in flight.
+ * 2. `getTransaction` reporting SUCCESS is not sufficient proof by itself —
+ *    observed in production against the public testnet RPC: it reported
+ *    SUCCESS for hashes that Horizon has never seen and that never changed
+ *    `funding_state.last_update`. So the real confirmation is the contract
+ *    state itself: read `last_update` before submitting, and after a
+ *    reported SUCCESS, re-read it and require it to have actually advanced.
  */
 async function updateFunding(
   server: sorobanRpc.Server,
   kp: Keypair,
   marketId: number
 ): Promise<string | null> {
+  const before = await readLastUpdate(server, marketId);
+
   const account = await server.getAccount(kp.publicKey());
   const tx = new TransactionBuilder(account, {
     fee: FEE,
@@ -117,9 +155,16 @@ async function updateFunding(
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
     const poll = await server.getTransaction(send.hash);
-    if (poll.status === "SUCCESS") return send.hash;
     if (poll.status === "FAILED") {
       throw new Error(`market ${marketId}: tx ${send.hash} failed on-chain`);
+    }
+    if (poll.status === "SUCCESS") {
+      const after = await readLastUpdate(server, marketId);
+      if (after !== null && after !== before) return send.hash;
+      console.warn(
+        `[funding] market ${marketId}: tx ${send.hash} reported SUCCESS but last_update didn't move (${before} -> ${after}) — treating as unconfirmed`
+      );
+      return null;
     }
   }
   console.warn(`[funding] market ${marketId}: confirmation timeout on ${send.hash} — ambiguous, retrying next tick`);
