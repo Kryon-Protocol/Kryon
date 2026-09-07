@@ -73,9 +73,29 @@ export function validateOrderIntent(body: unknown, networkPassphrase: string): V
   if (size === null || size <= 0n) return { ok: false, error: "size must be a positive integer" };
   if (size > MAX_SIZE) return { ok: false, error: "size exceeds maximum" };
 
-  // Limit price — 0 is reserved for market orders; positive values are limits.
+  // Limit price — must be strictly positive.
+  //
+  // Zero used to be accepted here as a "market order" sentinel, and the matcher
+  // still has a code path keyed on it. But the gateway's `validate_order`
+  // rejects `limit_price <= 0` outright, so such an order can match off-chain
+  // and then NEVER settle: the matcher loops match -> sim-fail -> rollback on it
+  // every tick until it expires, holding book depth the whole time. That is the
+  // same class of bug as accepting a signature scheme the chain won't verify —
+  // an order in the book whose settlement is impossible by construction.
+  //
+  // Market orders are expressed the way the UI already expresses them: an
+  // aggressive limit that crosses the book immediately (2x mark to buy, half to
+  // sell). The on-chain execution band still caps the price actually filled, so
+  // an aggressive limit is a crossing instruction, not a blank cheque.
   const limitPrice = parseBigInt(b.limit_price);
-  if (limitPrice === null || limitPrice < 0n) return { ok: false, error: "limit_price must be non-negative" };
+  if (limitPrice === null || limitPrice <= 0n) {
+    return {
+      ok: false,
+      error:
+        "limit_price must be a positive integer; for a market order send an " +
+        "aggressive crossing limit (e.g. 2x mark to buy, 0.5x to sell) rather than 0",
+    };
+  }
   if (limitPrice > MAX_PRICE) return { ok: false, error: "limit_price exceeds maximum" };
 
   // Nonce — uint64, matching the contract ABI.
