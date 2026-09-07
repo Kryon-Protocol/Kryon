@@ -305,11 +305,15 @@ async function main(): Promise<void> {
   );
 
   step("4. liquidate — the real contract call, the real key");
+  // The liquidator is paid in TOKENS, not vault credit: perp-insurance's
+  // `pay_liquidator` calls `token.transfer(insurance -> liquidator)` directly.
+  // An earlier version of this drill read the liquidator's VAULT balance, which
+  // never moves on that path, and reported "paid nothing" against a deployment
+  // that was in fact paying correctly. Read the balance the payment lands in.
   const liquidatorBalanceBefore = BigInt(
-    (await read(CONTRACTS.vault, "balance_of", [
+    ((await read(ASSETS.usdc, "balance", [
       new Address(liquidator.publicKey()).toScVal(),
-      new Address(ASSETS.usdc).toScVal(),
-    ])) as bigint
+    ])) ?? 0n) as bigint
   );
 
   const hash = await send(liquidator, CONTRACTS.liquidation, "liquidate", [
@@ -331,10 +335,9 @@ async function main(): Promise<void> {
   console.log(`   position size ${amt(target.size)} → ${amt(remaining?.size ?? 0n)}`);
 
   const liquidatorBalanceAfter = BigInt(
-    (await read(CONTRACTS.vault, "balance_of", [
+    ((await read(ASSETS.usdc, "balance", [
       new Address(liquidator.publicKey()).toScVal(),
-      new Address(ASSETS.usdc).toScVal(),
-    ])) as bigint
+    ])) ?? 0n) as bigint
   );
   // Name the cause rather than the symptom. A zero reward is almost always a
   // zero `max_reward_bps`, which was settable only at `initialize` and had no

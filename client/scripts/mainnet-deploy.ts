@@ -33,6 +33,11 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { spawnSync } from "child_process";
+import {
+  contractExports,
+  keySeparationViolations,
+  missingLifecycleExports,
+} from "../lib/deploy-preflight";
 
 const RPC_URL = process.env.MAINNET_RPC_URL ?? "https://mainnet.sorobanrpc.com";
 // Public mainnet RPCs are flaky; rotate through these on timeout.
@@ -232,12 +237,26 @@ async function main() {
   // ── Step 0: preflight ──────────────────────────────────────────────────────
   console.log("Step 0 — Preflight");
   for (const [name, want] of Object.entries(EXPECTED_SHA256)) {
-    const got = crypto.createHash("sha256")
-      .update(fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`)))
-      .digest("hex");
+    const wasm = fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`));
+    const got = crypto.createHash("sha256").update(wasm).digest("hex");
     if (got !== want) throw new Error(`artifact hash mismatch for ${name}: ${got}`);
+
+    // The hash answers "is this the build we rehearsed?" — it cannot answer
+    // "can this build ever be fixed?". The deployment currently live on mainnet
+    // shipped from a build with no `upgrade` entrypoint, so every contract
+    // there is permanently immutable: no audit finding can be patched, and the
+    // only remedy is a full redeploy and state migration. The hash was correct
+    // the whole time. Check the interface, not just the bytes.
+    const missing = missingLifecycleExports(contractExports(wasm));
+    if (missing.length) {
+      throw new Error(
+        `${name} is missing ${missing.join(", ")} — refusing to deploy a contract ` +
+        `that cannot be upgraded or handed over. This is exactly how the current ` +
+        `mainnet deployment became permanently immutable.`
+      );
+    }
   }
-  console.log("  ✓ all 8 artifact hashes match the rehearsed/simulated set");
+  console.log("  ✓ all 8 artifacts match the rehearsed hashes and expose upgrade/nominate_admin/accept_admin");
 
   const acct = await server.getAccount(admin);
   const bal = await fetch(`https://horizon.stellar.org/accounts/${admin}`)
@@ -451,6 +470,35 @@ async function main() {
 
   // ── Step 5: wire cross-references ─────────────────────────────────────────
   console.log("\nStep 5 — Wire");
+
+  // Key separation, checked against the roles actually about to be wired.
+  //
+  // The `?? admin` fallbacks below are the hazard: on a resumed run where the
+  // ops step was already marked done but state.ops did not survive, every
+  // operator slot silently resolves to the admin key — collapsing the roles the
+  // deployment exists to separate, with no error. The admin can replace every
+  // contract's code, so an operator key that is also admin is one keeper
+  // compromise away from total takeover. Testnet is live in exactly that shape
+  // today, with the oracle publisher as protocol admin.
+  const separationProblems = keySeparationViolations({
+    admin,
+    oracle: OPS["oracle-publisher"]?.pub,
+    matcher: OPS["matcher-operator"]?.pub,
+    liquidator: OPS["liquidator"]?.pub,
+  });
+  if (separationProblems.length) {
+    throw new Error(
+      "key separation violated — refusing to wire:\n  - " + separationProblems.join("\n  - ")
+    );
+  }
+  for (const role of ["oracle-publisher", "matcher-operator", "liquidator"]) {
+    if (!OPS[role]?.pub) {
+      throw new Error(
+        `${role} is missing from deployment state — it would silently fall back to ` +
+        `the admin key. Re-run Step 1 rather than wiring admin into an operator role.`
+      );
+    }
+  }
   const wire: [string, string, string, xdr.ScVal[]][] = [
     ["wire_vault_engine",    VAULT,  "set_engine",        [addr(ENGINE)]],
     ["wire_engine_gateway",  ENGINE, "set_order_gateway", [addr(GW)]],

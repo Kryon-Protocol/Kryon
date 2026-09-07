@@ -86,7 +86,13 @@ async function nativeBalance(server: Horizon.Server, address: string): Promise<n
     const acct = await server.loadAccount(address);
     return Number(acct.balances.find((b) => b.asset_type === "native")?.balance ?? "0");
   } catch (e) {
-    if (e instanceof Horizon.NetworkError && e.response?.status === 404) return null;
+    // `Horizon.NetworkError` is not exported by this SDK version, so the old
+    // `e instanceof Horizon.NetworkError` threw a TypeError ("right-hand side
+    // of instanceof is not callable") every time this catch ran — turning a
+    // missing account, the one case this is meant to handle, into a confusing
+    // crash. Match on the response shape instead.
+    const status = (e as { response?: { status?: number } })?.response?.status;
+    if (status === 404) return null;
     throw e;
   }
 }

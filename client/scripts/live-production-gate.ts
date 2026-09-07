@@ -48,7 +48,7 @@ function endpoint(path: string): string {
   return new URL(path, APP_URL).toString();
 }
 
-async function timed(name: string, fn: () => Promise<void>): Promise<CheckResult> {
+async function timed(name: string, fn: () => Promise<unknown>): Promise<CheckResult> {
   const started = performance.now();
   await fn();
   const ms = Math.round(performance.now() - started);

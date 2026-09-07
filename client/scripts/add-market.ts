@@ -233,7 +233,17 @@ async function submit(
   contractId: string,
   method: string,
   args: xdr.ScVal[],
-  label: string
+  label: string,
+  /**
+   * Contract error codes to treat as success rather than failure.
+   *
+   * Call sites were already passing this — `[1]` for AlreadyInitialized when a
+   * proposal id is re-queued — but the parameter did not exist, so the argument
+   * was silently discarded and the script aborted on a re-run instead of
+   * continuing past work it had already done. `scripts/` being excluded from
+   * tsconfig is why the arity mismatch was never reported.
+   */
+  tolerateErrorCodes: number[] = []
 ): Promise<void> {
   process.stdout.write(`  [${label}] `);
 
@@ -257,6 +267,13 @@ async function submit(
     const err = (sim as sorobanRpc.Api.SimulateTransactionErrorResponse).error ?? "";
     // #2 = Unauthorized: the args decoded, only the admin check refused.
     const unauthorized = err.includes("Error(Contract, #2)");
+    const tolerated = tolerateErrorCodes.find((code) =>
+      err.includes(`Error(Contract, #${code})`)
+    );
+    if (tolerated !== undefined) {
+      console.log(`✓ already done (contract error #${tolerated}, tolerated)`);
+      return;
+    }
     if (DRY && unauthorized) {
       console.log("✓ args valid (rejected only by admin check, as expected)");
       return;

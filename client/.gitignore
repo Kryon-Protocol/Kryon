@@ -83,6 +83,12 @@ scripts/migrate-add-order-signature.ts
 scripts/setup-usdc-trustline.ts
 scripts/setup-usdc-settlement.ts
 
-# Unit tests — kept local, not shipped in the public repo.
-*.test.ts
-*.test.tsx
+# Unit tests ARE shipped. They were previously ignored as "kept local", which
+# made the CI test step incapable of running anything: a fresh checkout had no
+# test files, the runner matched nothing, and the step passed having verified
+# nothing. One of these suites opens by stating that a regression "fails CI
+# instead of needing to be spotted on screen" — which can only be true if the
+# file is in the repository.
+#
+# The ad-hoc drill and debug scripts stay ignored (see above); those are the
+# things that genuinely should not ship.

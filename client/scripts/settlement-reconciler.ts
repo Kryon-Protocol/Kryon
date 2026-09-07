@@ -21,7 +21,7 @@
  *   or via package.json: npm run dev:reconciler
  */
 
-import { neon, neonConfig } from "../lib/sql";
+import { neon, neonConfig, type NeonQueryFunction } from "../lib/sql";
 import {
   Keypair,
   TransactionBuilder,
@@ -34,6 +34,9 @@ assertRequiredSecrets(["DATABASE_URL", "MATCHER_OPERATOR_SECRET"]);
 assertNoPublicSecretLeak();
 
 neonConfig.fetchConnectionCache = true;
+
+/** The tagged-template query function this module passes around. */
+type Sql = NeonQueryFunction<false, false>;
 
 const TICK_INTERVAL_MS = 15_000;
 const SUBMITTED_CHECK_AFTER_SECS = 30;
@@ -66,6 +69,38 @@ type JobPayload = {
 
 function parsePayload(raw: string): JobPayload | null {
   try { return JSON.parse(raw); } catch { return null; }
+}
+
+/**
+ * Undo the off-chain effects of a fill that will never settle.
+ *
+ * Deletes the Fill row and returns the consumed size to both orders. Safe to
+ * run more than once: the DELETE is keyed on the pending tx hash, and the
+ * decrements clamp at zero.
+ *
+ * This has to happen on EVERY terminal failure, not just an auth-collection
+ * timeout. A settlement that failed on-chain leaves the same wreckage: the
+ * orders show size they never actually traded, so that depth is gone from the
+ * book until they expire, and the Fill counts toward volume and the leaderboard
+ * as a trade that did not happen.
+ */
+async function rollbackFill(sql: Sql, network: string, payload: JobPayload | null): Promise<void> {
+  if (!payload?.pendingTxHash || !payload.makerAddress || !payload.takerAddress || !payload.fillSize) {
+    return;
+  }
+  await sql`DELETE FROM "Fill" WHERE network = ${network} AND "txHash" = ${payload.pendingTxHash}`;
+  for (const [owner, nonce] of [
+    [payload.makerAddress, payload.makerNonce],
+    [payload.takerAddress, payload.takerNonce],
+  ] as [string, string | undefined][]) {
+    if (!nonce) continue;
+    await sql`
+      UPDATE "Order"
+      SET "filledSize" = GREATEST(0::numeric, "filledSize"::numeric - ${payload.fillSize}::numeric)::text,
+          "updatedAt" = NOW()
+      WHERE owner = ${owner} AND nonce = ${nonce}
+    `;
+  }
 }
 
 // ── Confirm a SUBMITTED job by checking Horizon ───────────────────────────────
@@ -110,12 +145,18 @@ async function reconcileSubmitted(
   }
 
   if (poll.status === "FAILED") {
+    // Roll back BEFORE marking terminal, so a crash between the two leaves the
+    // job still SUBMITTED and the next tick retries rather than stranding a
+    // fill that the chain rejected.
+    await rollbackFill(sql, job.network, parsePayload(job.unsignedXdr));
     await sql`
       UPDATE "TxJob"
       SET status = 'FAILED', "lastError" = 'on-chain tx failed', "updatedAt" = NOW()
       WHERE id = ${job.id} AND status = 'SUBMITTED'
     `;
-    console.log(`  [reconciler] FAILED job ${job.id.slice(0, 8)} (tx failed on-chain)`);
+    console.log(
+      `  [reconciler] FAILED job ${job.id.slice(0, 8)} (tx failed on-chain) — fill rolled back`
+    );
     return;
   }
 
@@ -243,26 +284,7 @@ async function expireStaleQueued(sql: ReturnType<typeof neon>) {
     // Skip jobs with both auth entries — resubmit logic handles those
     if (payload?.makerSignedEntry && payload?.takerSignedEntry) continue;
 
-    if (payload?.pendingTxHash && payload?.makerAddress && payload?.takerAddress && payload?.fillSize) {
-      // Roll back fill
-      await sql`DELETE FROM "Fill" WHERE network = ${job.network} AND "txHash" = ${payload.pendingTxHash}`;
-      if (payload.makerNonce) {
-        await sql`
-          UPDATE "Order"
-          SET "filledSize" = GREATEST(0::numeric, "filledSize"::numeric - ${payload.fillSize}::numeric)::text,
-              "updatedAt" = NOW()
-          WHERE owner = ${payload.makerAddress} AND nonce = ${payload.makerNonce}
-        `;
-      }
-      if (payload.takerNonce) {
-        await sql`
-          UPDATE "Order"
-          SET "filledSize" = GREATEST(0::numeric, "filledSize"::numeric - ${payload.fillSize}::numeric)::text,
-              "updatedAt" = NOW()
-          WHERE owner = ${payload.takerAddress} AND nonce = ${payload.takerNonce}
-        `;
-      }
-    }
+    await rollbackFill(sql, job.network, payload);
 
     await sql`
       UPDATE "TxJob"

@@ -40,6 +40,11 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { spawnSync } from "child_process";
+import {
+  contractExports,
+  keySeparationViolations,
+  missingLifecycleExports,
+} from "../lib/deploy-preflight";
 
 const RPC_URL = process.env.TESTNET_RPC_URL ?? "https://soroban-testnet.stellar.org";
 const RPC_POOL = [RPC_URL, "https://soroban-testnet.stellar.org"];
@@ -71,14 +76,14 @@ const SECRETS_PATH = STATE_PATH.replace(/(-deployment)?(-v\d+)?\.json$/, "") + "
 //   python3 infra/deploy/optimize-wasm.py --all target/wasm32v1-none/release \
 //     target/wasm32v1-none/release/deploy && shasum -a 256 <dir>/*.wasm
 const EXPECTED_SHA256: Record<string, string> = {
-  perp_vault:         "ddd3658dfc51022a1eed49769b04debcbd235386df22d536a303082d6f023fe7",
-  perp_engine:        "67dc771def5d329c1cf758dd8423ad7221053ba447a7b9db49062f89df14f2f1",
-  perp_order_gateway: "5a163c83ee26c7a2720358a116b8f60250dfafbefc840dfad6ad6d68af929626",
-  perp_risk:          "5128c35c1b3a000ed88841d8936a05d269c3ac82a2c5529ecbf1a1b494624eca",
-  perp_oracle_adapter:"cf50b4d039ec134b24c8ee485a4f73af6223e71a8df8573613c69eba73189e58",
-  perp_insurance:     "b13223c71457e20689fe2214d4eeae64119013fe88863565ecb5b3658eef95c8",
-  perp_liquidation:   "4932f8d18d38f62e9c855a9985bc12e4e44ec33448c497ee19cea5013bdc4433",
-  perp_governance:    "2f54dca257a3eafe3fcd1f8723154ec1f656b61dcbe947f66c8e9a561848c9db",
+  perp_vault:          "0bce8f7fa607fc83afe59e0eba457fc4c18e18ae0d26735d6c81d41b38751832",
+  perp_engine:         "c1fb50b4db768778cf43144ab3c5fa21ba647ad28c1bfc8c4721dfcc046a7da9",
+  perp_order_gateway:  "7ac01e8b11061f148077c0ab2bdbc939c97e4c055131d12983e4daa3c50876d1",
+  perp_risk:           "0385b606e9c9a29cd7bd0cf45c656499ef68d017282a4165070701faafdc7ebb",
+  perp_oracle_adapter: "3df25f0041594813050bb841b9c21ebc8a33e06bdfc27fcd8a790f9ae7f41556",
+  perp_insurance:      "134cf5ffb4367e79420d544ce990f21ce36a201f8080577b944854aeb29f5d5b",
+  perp_liquidation:    "a8e496bae1540b562bf58ceeaedeecb5a2a836f630a7c304ed0ae005b1884753",
+  perp_governance:     "11b7d1c04fe074a03755d6d828838d27df6da4b5db7062355aae8bedb70c6fd6",
 };
 
 const PRECISION = BigInt("1000000000000000000");
@@ -237,12 +242,26 @@ async function main() {
   // ── Step 0: preflight ──────────────────────────────────────────────────────
   console.log("Step 0 — Preflight");
   for (const [name, want] of Object.entries(EXPECTED_SHA256)) {
-    const got = crypto.createHash("sha256")
-      .update(fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`)))
-      .digest("hex");
+    const wasm = fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`));
+    const got = crypto.createHash("sha256").update(wasm).digest("hex");
     if (got !== want) throw new Error(`artifact hash mismatch for ${name}: ${got}`);
+
+    // The hash answers "is this the build we rehearsed?" — it cannot answer
+    // "can this build ever be fixed?". Both live deployments shipped from a
+    // build with no `upgrade` entrypoint, which froze every contract on
+    // testnet and mainnet permanently: no audit finding can be patched there,
+    // and the only remedy is a full redeploy and state migration. The hash was
+    // correct the whole time. Check the interface, not just the bytes.
+    const missing = missingLifecycleExports(contractExports(wasm));
+    if (missing.length) {
+      throw new Error(
+        `${name} is missing ${missing.join(", ")} — refusing to deploy a contract ` +
+        `that cannot be upgraded or handed over. This is exactly how the current testnet ` +
+        `deployment became permanently immutable.`
+      );
+    }
   }
-  console.log("  ✓ all 8 artifact hashes match the mainnet-rehearsed set");
+  console.log("  ✓ all 8 artifacts match the rehearsed hashes and expose upgrade/nominate_admin/accept_admin");
 
   if (!DRY) await server.getAccount(admin); // throws if unfunded/nonexistent
 
@@ -251,6 +270,25 @@ async function main() {
   const ORACLE_PUB = process.env.ORACLE_PUBLISHER_ADDRESS;
   const MATCHER_PUB = process.env.MATCHER_OPERATOR_ADDRESS;
   const LIQUIDATOR_PUB = process.env.LIQUIDATOR_ADDRESS;
+  // Key separation. The admin can replace every contract's code; the operator
+  // roles sign continuously from keeper hosts and are the most exposed keys in
+  // the system. A key that is both is one keeper compromise away from total
+  // takeover — and that is not hypothetical: the deployment currently live on
+  // testnet has the ORACLE PUBLISHER as protocol admin, confirmed on-chain.
+  // The settlement route already states the rule ("one key must never serve two
+  // roles"); nothing enforced it at the point where roles are assigned.
+  const separationProblems = keySeparationViolations({
+    admin,
+    oracle: ORACLE_PUB,
+    matcher: MATCHER_PUB,
+    liquidator: LIQUIDATOR_PUB,
+  });
+  if (separationProblems.length) {
+    throw new Error(
+      "key separation violated — refusing to deploy:\n  - " + separationProblems.join("\n  - ")
+    );
+  }
+
   if (!ORACLE_PUB || !MATCHER_PUB || !LIQUIDATOR_PUB) {
     console.error("ORACLE_PUBLISHER_ADDRESS / MATCHER_OPERATOR_ADDRESS / LIQUIDATOR_ADDRESS must all be set");
     process.exit(1);

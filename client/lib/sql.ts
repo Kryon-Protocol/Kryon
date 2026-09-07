@@ -40,8 +40,13 @@ class RawSql {
 export type Row = Record<string, any>;
 
 export interface SqlClient {
-  (strings: TemplateStringsArray, ...values: unknown[]): Promise<Row[]>;
-  query(text: string, params?: unknown[]): Promise<Row[]>;
+  // Generic in the row type, like the Neon driver this stands in for. Call
+  // sites written as `sql<JobRow[]>` were not typechecking at all — not because
+  // they were wrong, but because `scripts/` was excluded from tsconfig, so the
+  // dropped generic went unnoticed and every such query silently degraded to
+  // `Row[]` (`Record<string, any>`), erasing the row shape the caller declared.
+  <T = Row[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+  query<T = Row[]>(text: string, params?: unknown[]): Promise<T>;
   unsafe(text: string): RawSql;
   end(): Promise<void>;
 }
@@ -146,9 +151,11 @@ export function neon(url: string): SqlClient {
   }) as SqlClient;
 
   // Neon's .query resolves to the rows array itself, not a QueryResult.
-  client.query = async (text: string, params: unknown[] = []) => {
+  // Generic to match the interface: the caller declares the row shape, exactly
+  // as it does for the tagged-template form.
+  client.query = async <T = Row[]>(text: string, params: unknown[] = []) => {
     const res = await getPool(url).query(text, params as never[]);
-    return res.rows as Row[];
+    return res.rows as T;
   };
   client.unsafe = (text: string) => new RawSql(text);
   client.end = async () => {

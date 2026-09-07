@@ -17,12 +17,28 @@ export async function GET(req: NextRequest) {
     return NextResponse.json([], { status: 429 });
   }
 
+  // Reject a bad value rather than passing NaN into the query. `parseInt("x")`
+  // is NaN, `Math.min(NaN, 50)` is NaN, and `LIMIT NaN` reaches Postgres as a
+  // type error — so a malformed query string produced a 500 that read like a
+  // server fault instead of a 400 that names the caller's mistake. Same for
+  // `since`, where an unparseable value became an Invalid Date.
+  const limitRaw = req.nextUrl.searchParams.get("limit");
+  const limitNum = limitRaw === null ? 20 : Number(limitRaw);
+  if (!Number.isInteger(limitNum) || limitNum < 1) {
+    return NextResponse.json({ error: "invalid_limit" }, { status: 400 });
+  }
+  const limit = Math.min(limitNum, 50);
+
   const since = req.nextUrl.searchParams.get("since");
-  const limit = Math.min(parseInt(req.nextUrl.searchParams.get("limit") ?? "20", 10), 50);
+  const sinceMs = since === null ? null : Number(since);
+  if (sinceMs !== null && !Number.isFinite(sinceMs)) {
+    return NextResponse.json({ error: "invalid_since" }, { status: 400 });
+  }
 
   try {
     const sql = db(networkFromRequest(req));
-    const sinceDate = since ? new Date(parseInt(since, 10)) : new Date(Date.now() - 24 * 3600 * 1000);
+    const sinceDate =
+      sinceMs === null ? new Date(Date.now() - 24 * 3600 * 1000) : new Date(sinceMs);
 
     const rows = await sql`
       SELECT
