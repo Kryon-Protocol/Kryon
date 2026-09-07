@@ -5,22 +5,22 @@
  *
  * Why this exists
  * ---------------
- * A testnet drill liquidated two real positions correctly and paid the
- * liquidator nothing, both times: `max_reward_bps` was 0. Liquidation was
- * mechanically perfect and economically dead — a keeper pays gas and receives
- * nothing, so in production no rational operator ever calls it. That is a
- * better explanation for why liquidation had never run than "nobody triggered
- * it" (audit KRY-Q9).
+ * `max_reward_bps` could only be set at `initialize` and had no reader, so its
+ * value could not be inspected or corrected on a running deployment without a
+ * redeploy. Both gaps are fixed in the contract; this is the tool that uses
+ * them.
  *
- * Separately, `set_oi_policy` bounds a market's open-interest notional against
- * the insurance fund. Liquidation closes a distressed position with no
+ * `set_oi_policy` bounds a market's open-interest notional against the
+ * insurance fund. Liquidation closes a distressed position with no
  * counterparty, so the fund is the protocol's implicit other side; until a
  * policy is set that exposure is unbounded (audit KRY-Q4). The cap is inert
- * until configured, so a fresh deployment has no bound at all.
+ * until configured, so a fresh deployment has no bound at all — and because the
+ * cap is measured against the fund, capitalise the fund BEFORE setting a
+ * policy or the cap computes to zero and refuses every new position.
  *
- * Neither entrypoint exists on the contracts currently live on testnet or
- * mainnet — those were deployed from a build with no `upgrade` function and are
- * permanently immutable. This script becomes usable against a redeployment.
+ * Neither entrypoint exists on the older deployments still live on testnet and
+ * mainnet: those were built without an `upgrade` function and are permanently
+ * immutable. This script targets a redeployment from current source.
  *
  * DRY RUN BY DEFAULT. Nothing is submitted without `--execute`.
  *
@@ -131,6 +131,10 @@ async function submit(contractId: string, method: string, callArgs: xdr.ScVal[],
 const UNBOUNDED = (1n << 127n) - 1n;
 
 function describeCoverage(result: { value?: unknown; error?: string }): string {
+  // #5 is InvalidConfig, which here means `load_market` found nothing — the
+  // policy was still set, the market just is not registered on this deployment
+  // yet. Reporting the raw error read as a failure of the write above it.
+  if (result.error?.includes("#5")) return "policy set (market not registered yet)";
   if (result.error) return result.error;
   if (result.value === null || result.value === undefined) return "unavailable";
   const bps = BigInt(result.value as string | number | bigint);
