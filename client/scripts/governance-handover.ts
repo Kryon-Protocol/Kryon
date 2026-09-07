@@ -98,6 +98,11 @@ const TARGETS: Array<{ name: string; id: string; pausable: boolean }> = [
   { name: "oracleAdapter", id: CONTRACTS.oracleAdapter, pausable: false },
   { name: "liquidation", id: CONTRACTS.liquidation, pausable: false },
   { name: "insurance", id: CONTRACTS.insurance, pausable: false },
+  // Advisory-only and unwired, but still admin-gated for set_market and
+  // upgrade. Leaving one contract on a plain keypair while the other six sit
+  // behind the timelock is the kind of gap that gets forgotten and then found
+  // by someone else.
+  { name: "risk", id: CONTRACTS.risk, pausable: false },
 ];
 
 const server = new sorobanRpc.Server(NETWORK.rpcUrl);
@@ -186,6 +191,21 @@ async function phaseNominate(admin: Keypair): Promise<void> {
     const current = await read(t.id, "admin", []);
     if (current === CONTRACTS.governance) {
       console.log(`   ${t.name.padEnd(13)} already admin'd by governance — skipping`);
+      continue;
+    }
+
+    // Idempotent: a proposal id is derived from the contract name, and `queue`
+    // rejects a duplicate with AlreadyInitialized. Without this check, adding a
+    // single contract to TARGETS aborted the whole run on the first one that had
+    // already been queued — so a partially-completed handover could not be
+    // finished, only restarted from scratch.
+    const existing = (await read(CONTRACTS.governance, "proposal", [
+      nativeToScVal(proposalId(t.name), { type: "bytes" }),
+    ])) as Record<string, unknown> | null;
+    if (existing) {
+      console.log(
+        `   ${t.name.padEnd(13)} already queued (${String(existing.status)}, eta ${String(existing.eta)}) — skipping`
+      );
       continue;
     }
 
