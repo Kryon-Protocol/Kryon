@@ -65,10 +65,19 @@ const MARKETS = Object.values(ACTIVE_MARKETS).map((m) => ({
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Submit one `update_funding`. Returns the tx hash, or null when the market
- * declined the update for an expected reason (stale oracle, unconfigured
- * funding) — those are logged, not thrown, so one bad market cannot stop the
- * other seven from funding.
+ * Submit one `update_funding` and wait for it to land. Returns the tx hash on
+ * confirmed success, or null when the market declined the update for an
+ * expected reason (stale oracle, unconfigured funding, or an ambiguous
+ * confirmation timeout) — those are logged, not thrown, so one bad market
+ * cannot stop the other seven from funding.
+ *
+ * Waiting for confirmation (rather than just staggering submissions) matters
+ * because every market shares one account: `getAccount` returns the
+ * on-chain sequence, so submitting the next market's tx before this one has
+ * landed hands it a stale sequence number. A short stagger isn't enough on
+ * testnet's ~5s ledger close — most submissions after the first silently
+ * never land, and the one after that gets an explicit txBadSeq. This is the
+ * same reason oracle-keeper's `writePrice` polls before moving on.
  */
 async function updateFunding(
   server: sorobanRpc.Server,
@@ -104,7 +113,17 @@ async function updateFunding(
       `market ${marketId}: ${send.errorResult?.toXDR("base64") ?? "submit error"}`
     );
   }
-  return send.hash;
+
+  for (let i = 0; i < 15; i++) {
+    await sleep(1000);
+    const poll = await server.getTransaction(send.hash);
+    if (poll.status === "SUCCESS") return send.hash;
+    if (poll.status === "FAILED") {
+      throw new Error(`market ${marketId}: tx ${send.hash} failed on-chain`);
+    }
+  }
+  console.warn(`[funding] market ${marketId}: confirmation timeout on ${send.hash} — ambiguous, retrying next tick`);
+  return null;
 }
 
 async function tick(server: sorobanRpc.Server, kp: Keypair): Promise<void> {
