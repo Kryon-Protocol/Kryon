@@ -35,6 +35,7 @@ import {
 import { StrKey } from "@stellar/stellar-sdk";
 import { neon, type NeonQueryFunction } from "../lib/sql";
 import { ACTIVE_MARKETS, ASSETS, CONTRACTS, NETWORK } from "../config";
+import { closeSizeLadder } from "../lib/market/liquidation-sizing";
 import { assertNoPublicSecretLeak, assertRequiredSecrets } from "../lib/secrets-check";
 
 assertRequiredSecrets(["DATABASE_URL", "LIQUIDATOR_SECRET"]);
@@ -269,7 +270,8 @@ async function submitLiquidate(
 async function liquidateAccount(
   server: sorobanRpc.Server,
   liquidatorKp: Keypair,
-  user: string
+  user: string,
+  health: HealthView
 ): Promise<boolean> {
   const positions = await positionsOf(server, user);
   if (positions.length === 0) return false;
@@ -299,10 +301,19 @@ async function liquidateAccount(
       console.error(`  no fresh oracle price for market ${pos.market_id} — skipping`);
       continue;
     }
-    // Full close first, then step down. The contract enforces the actual
-    // improvement invariant; these are just proposals.
-    for (const fraction of [1n, 2n, 4n]) {
-      const closeSize = pos.size / fraction;
+    // Smallest viable close FIRST, escalating only if the contract refuses.
+    //
+    // This used to try a full close first and step down to 1/2 and 1/4. Because
+    // closing 100% always improves health, the first attempt always succeeded —
+    // so every liquidatable account was fully liquidated, even one that dipped a
+    // fraction below maintenance and would have been restored by closing a
+    // tenth of its position. The contract cannot catch this: it enforces that
+    // health improved, not that the close was minimal.
+    //
+    // The sizing is the same arithmetic as `risk_engine::plan_liquidation`,
+    // which computes exactly this and which nothing ever called.
+    const ladder = closeSizeLadder(pos, price, health);
+    for (const closeSize of ladder) {
       if (closeSize <= 0n) continue;
       const hash = await submitLiquidate(
         server,
@@ -413,7 +424,7 @@ async function run() {
           console.log(
             `[${new Date().toISOString().slice(11, 19)}] liquidatable: ${address.slice(0, 8)} equity=${health.equity}`
           );
-          await liquidateAccount(server, liquidatorKp, address);
+          await liquidateAccount(server, liquidatorKp, address, health);
         } catch (e) {
           console.error(`  account ${address.slice(0, 8)}: ${(e as Error).message?.slice(0, 100)}`);
         }
