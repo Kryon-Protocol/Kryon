@@ -23,13 +23,14 @@ KEYS=(
   NEXT_PUBLIC_CONTRACT_LIQUIDATION NEXT_PUBLIC_CONTRACT_RISK
   NEXT_PUBLIC_ASSET_NATIVE_XLM NEXT_PUBLIC_ASSET_USDC NEXT_PUBLIC_USDC_ISSUER
   ORACLE_PUBLISHER_SECRET MATCHER_OPERATOR_SECRET LIQUIDATOR_SECRET
+  FUNDING_KEEPER_SECRET
   # The network-suffixed spellings the multi-network code also accepts. A key
   # set only under a suffixed name used to be dropped here silently, which for
   # the matcher meant starting with no settlement key at all — every match
   # rolled straight back and the venue recorded no trades.
   ORACLE_PUBLISHER_SECRET_TESTNET MATCHER_OPERATOR_SECRET_TESTNET LIQUIDATOR_SECRET_TESTNET
   PUBLISH_TIME_BACKDATE_SECS PUBLISH_STAGGER_MS ALERT_WEBHOOK_URL
-  SETTLEMENT_JOB_MAX_AGE_MINUTES
+  SETTLEMENT_JOB_MAX_AGE_MINUTES FUNDING_INTERVAL_MS FUNDING_STAGGER_MS
 )
 
 : > .env.testnet

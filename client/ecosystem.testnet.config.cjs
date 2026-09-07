@@ -49,6 +49,7 @@ const SERVICES = [
     env: { PORT: "8081" },
   },
   { name: "liquidator", script: "liquidation-keeper.ts", restart_delay: 5000, max_restarts: 20 },
+  { name: "funding", script: "funding-keeper.ts", restart_delay: 5000, max_restarts: 20 },
   { name: "reconciler", script: "settlement-reconciler.ts", restart_delay: 10000, max_restarts: 10 },
   {
     name: "monitor",
