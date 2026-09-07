@@ -40,6 +40,11 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { spawnSync } from "child_process";
+import {
+  contractExports,
+  keySeparationViolations,
+  missingLifecycleExports,
+} from "../lib/deploy-preflight";
 
 const RPC_URL = process.env.TESTNET_RPC_URL ?? "https://soroban-testnet.stellar.org";
 const RPC_POOL = [RPC_URL, "https://soroban-testnet.stellar.org"];
@@ -237,12 +242,26 @@ async function main() {
   // ── Step 0: preflight ──────────────────────────────────────────────────────
   console.log("Step 0 — Preflight");
   for (const [name, want] of Object.entries(EXPECTED_SHA256)) {
-    const got = crypto.createHash("sha256")
-      .update(fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`)))
-      .digest("hex");
+    const wasm = fs.readFileSync(path.join(ARTIFACTS, `${name}.wasm`));
+    const got = crypto.createHash("sha256").update(wasm).digest("hex");
     if (got !== want) throw new Error(`artifact hash mismatch for ${name}: ${got}`);
+
+    // The hash answers "is this the build we rehearsed?" — it cannot answer
+    // "can this build ever be fixed?". Both live deployments shipped from a
+    // build with no `upgrade` entrypoint, which froze every contract on
+    // testnet and mainnet permanently: no audit finding can be patched there,
+    // and the only remedy is a full redeploy and state migration. The hash was
+    // correct the whole time. Check the interface, not just the bytes.
+    const missing = missingLifecycleExports(contractExports(wasm));
+    if (missing.length) {
+      throw new Error(
+        `${name} is missing ${missing.join(", ")} — refusing to deploy a contract ` +
+        `that cannot be upgraded or handed over. This is exactly how the current testnet ` +
+        `deployment became permanently immutable.`
+      );
+    }
   }
-  console.log("  ✓ all 8 artifact hashes match the mainnet-rehearsed set");
+  console.log("  ✓ all 8 artifacts match the rehearsed hashes and expose upgrade/nominate_admin/accept_admin");
 
   if (!DRY) await server.getAccount(admin); // throws if unfunded/nonexistent
 
@@ -251,6 +270,25 @@ async function main() {
   const ORACLE_PUB = process.env.ORACLE_PUBLISHER_ADDRESS;
   const MATCHER_PUB = process.env.MATCHER_OPERATOR_ADDRESS;
   const LIQUIDATOR_PUB = process.env.LIQUIDATOR_ADDRESS;
+  // Key separation. The admin can replace every contract's code; the operator
+  // roles sign continuously from keeper hosts and are the most exposed keys in
+  // the system. A key that is both is one keeper compromise away from total
+  // takeover — and that is not hypothetical: the deployment currently live on
+  // testnet has the ORACLE PUBLISHER as protocol admin, confirmed on-chain.
+  // The settlement route already states the rule ("one key must never serve two
+  // roles"); nothing enforced it at the point where roles are assigned.
+  const separationProblems = keySeparationViolations({
+    admin,
+    oracle: ORACLE_PUB,
+    matcher: MATCHER_PUB,
+    liquidator: LIQUIDATOR_PUB,
+  });
+  if (separationProblems.length) {
+    throw new Error(
+      "key separation violated — refusing to deploy:\n  - " + separationProblems.join("\n  - ")
+    );
+  }
+
   if (!ORACLE_PUB || !MATCHER_PUB || !LIQUIDATOR_PUB) {
     console.error("ORACLE_PUBLISHER_ADDRESS / MATCHER_OPERATOR_ADDRESS / LIQUIDATOR_ADDRESS must all be set");
     process.exit(1);
