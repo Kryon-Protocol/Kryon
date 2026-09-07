@@ -314,7 +314,9 @@ impl PerpEngineContract {
                 .set(&DataKey::OiPolicy(market_id), &max_oi_per_insurance_bps);
         }
         if new_total_bps == 0 {
-            env.storage().persistent().remove(&DataKey::TotalOiPolicyBps);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::TotalOiPolicyBps);
         } else {
             env.storage()
                 .persistent()
@@ -489,7 +491,9 @@ impl PerpEngineContract {
             }
             imported += 1;
         }
-        env.storage().instance().set(&DataKey::NextPositionId, &next_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextPositionId, &next_id);
         Ok(imported)
     }
 
@@ -500,7 +504,9 @@ impl PerpEngineContract {
     /// instant, unreviewable action.
     pub fn seal_migration(env: Env) -> Result<(), CoreError> {
         require_admin(&env)?;
-        env.storage().instance().set(&DataKey::MigrationSealed, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationSealed, &true);
         Ok(())
     }
 
@@ -1912,7 +1918,8 @@ mod tests {
         fn migration_cannot_run_again_once_sealed() {
             let s = setup();
             let migrated_user = Address::generate(&s.env);
-            s.engine.migrate_import_positions(&Vec::from_array(&s.env, []));
+            s.engine
+                .migrate_import_positions(&Vec::from_array(&s.env, []));
             assert!(!s.engine.migration_sealed());
             s.engine.seal_migration();
             assert!(s.engine.migration_sealed());
