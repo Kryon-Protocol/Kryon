@@ -26,7 +26,8 @@
     "dev:funding": "tsx --env-file=.env.local scripts/funding-keeper.ts",
     "drill:liquidation": "tsx --env-file=.env.local scripts/liquidation-drill.ts",
     "governance:handover": "tsx --env-file=.env.local scripts/governance-handover.ts",
-    "risk:params": "tsx --env-file=.env.local scripts/set-risk-params.ts"
+    "risk:params": "tsx --env-file=.env.local scripts/set-risk-params.ts",
+    "contracts:upgrade": "tsx scripts/upgrade-contracts.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
