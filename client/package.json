@@ -22,7 +22,7 @@
     "cf:build": "opennextjs-cloudflare build",
     "cf:preview": "opennextjs-cloudflare preview",
     "cf:deploy": "opennextjs-cloudflare deploy",
-    "test": "tsx --test \"**/*.test.ts\"",
+    "test": "node scripts/run-unit-tests.mjs",
     "dev:funding": "tsx --env-file=.env.local scripts/funding-keeper.ts",
     "drill:liquidation": "tsx --env-file=.env.local scripts/liquidation-drill.ts",
     "governance:handover": "tsx --env-file=.env.local scripts/governance-handover.ts"
