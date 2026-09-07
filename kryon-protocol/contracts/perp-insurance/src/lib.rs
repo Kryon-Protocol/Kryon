@@ -28,8 +28,20 @@ pub enum DataKey {
     /// payouts can never silently draw down staked capital without the
     /// deliberate, visible `sweep_to_operating` action.
     StakedBalance(Address),
-    /// (asset, staker) -> shares outstanding for that staker.
+    /// (asset, staker) -> shares outstanding, tagged with the epoch they were
+    /// minted in. Shares from a retired epoch are worthless; see `Epoch`.
     Shares(Address, Address),
+    /// asset -> current share epoch, bumped whenever a loss takes staked NAV to
+    /// zero while shares are still outstanding.
+    ///
+    /// Without this a wiped pool becomes a trap. `sweep_to_operating` can take
+    /// NAV to zero while `TotalShares` stays positive, and `stake` then mints
+    /// 1:1 against nothing — so the next staker is instantly diluted by shares
+    /// that will never have a claim on anything. Depositing 100 into a pool
+    /// that once held 1,000,000 shares redeems for about 0.01. Retiring the
+    /// epoch invalidates those shares in a single write, without enumerating
+    /// holders, which this contract cannot do.
+    Epoch(Address),
     /// asset -> total shares outstanding, the denominator for share pricing.
     TotalShares(Address),
     /// (asset, staker) -> a requested-but-not-yet-withdrawn unstake.
@@ -41,6 +53,17 @@ pub enum DataKey {
 pub struct PendingUnstakeRequest {
     pub shares: i128,
     pub unlock_time: u64,
+    /// Epoch the shares were minted in. A request that outlives its epoch is
+    /// trying to redeem shares a loss already wrote off.
+    pub epoch: u32,
+}
+
+/// A staker's share balance, valid only within `epoch`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShareBalance {
+    pub epoch: u32,
+    pub shares: i128,
 }
 
 #[contract]
@@ -244,7 +267,12 @@ impl PerpInsuranceContract {
     /// them against the shared operating pool would let the first staker
     /// walk away with every donation made before any shares existed, since
     /// there would be no existing share supply to price that capital against.
-    pub fn stake(env: Env, staker: Address, asset: Address, amount: i128) -> Result<i128, CoreError> {
+    pub fn stake(
+        env: Env,
+        staker: Address,
+        asset: Address,
+        amount: i128,
+    ) -> Result<i128, CoreError> {
         staker.require_auth();
         if amount <= 0 {
             return Err(CoreError::InvalidAmount);
@@ -261,10 +289,17 @@ impl PerpInsuranceContract {
         } else {
             mul_div(amount, total_shares, nav_before)?
         };
-        let next_shares = checked_add(shares_of(env.clone(), asset.clone(), staker.clone()), minted)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Shares(asset.clone(), staker.clone()), &next_shares);
+        let next_shares = checked_add(
+            shares_of(env.clone(), asset.clone(), staker.clone()),
+            minted,
+        )?;
+        env.storage().persistent().set(
+            &DataKey::Shares(asset.clone(), staker.clone()),
+            &ShareBalance {
+                epoch: epoch_of(&env, &asset),
+                shares: next_shares,
+            },
+        );
         let next_total = checked_add(total_shares, minted)?;
         env.storage()
             .persistent()
@@ -296,9 +331,14 @@ impl PerpInsuranceContract {
             return Err(CoreError::InvalidConfig);
         }
         let unlock_time = env.ledger().timestamp() + UNSTAKE_COOLDOWN_SECS;
+        let epoch = epoch_of(&env, &asset);
         env.storage().persistent().set(
             &DataKey::PendingUnstake(asset, staker),
-            &PendingUnstakeRequest { shares, unlock_time },
+            &PendingUnstakeRequest {
+                shares,
+                unlock_time,
+                epoch,
+            },
         );
         Ok(unlock_time)
     }
@@ -318,6 +358,20 @@ impl PerpInsuranceContract {
             return Err(CoreError::InvalidConfig);
         }
 
+        // A request that outlived its epoch is redeeming shares a loss already
+        // wrote off. Clear it and pay nothing, rather than letting it compute a
+        // claim against the new epoch's capital, which belongs to whoever
+        // recapitalised the pool.
+        if request.epoch != epoch_of(&env, &asset) {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Shares(asset.clone(), staker.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PendingUnstake(asset, staker));
+            return Ok(0);
+        }
+
         let total_shares = total_shares_of(env.clone(), asset.clone());
         let nav = staked_balance_of(env.clone(), asset.clone());
         let payout = if total_shares <= 0 {
@@ -332,19 +386,28 @@ impl PerpInsuranceContract {
             token::Client::new(&env, &asset).transfer(&insurance, &staker, &payout);
         }
 
-        let remaining_shares = checked_sub(shares_of(env.clone(), asset.clone(), staker.clone()), request.shares)?;
+        let remaining_shares = checked_sub(
+            shares_of(env.clone(), asset.clone(), staker.clone()),
+            request.shares,
+        )?;
         if remaining_shares <= 0 {
             env.storage()
                 .persistent()
                 .remove(&DataKey::Shares(asset.clone(), staker.clone()));
         } else {
-            env.storage()
-                .persistent()
-                .set(&DataKey::Shares(asset.clone(), staker.clone()), &remaining_shares);
+            env.storage().persistent().set(
+                &DataKey::Shares(asset.clone(), staker.clone()),
+                &ShareBalance {
+                    epoch: request.epoch,
+                    shares: remaining_shares,
+                },
+            );
         }
         let remaining_total = checked_sub(total_shares, request.shares)?;
         if remaining_total <= 0 {
-            env.storage().persistent().remove(&DataKey::TotalShares(asset.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::TotalShares(asset.clone()));
         } else {
             env.storage()
                 .persistent()
@@ -373,12 +436,20 @@ impl PerpInsuranceContract {
             return Err(CoreError::InvalidAmount);
         }
         let available = staked_balance_of(env.clone(), asset.clone());
-        let swept = if available < amount { available } else { amount };
+        let swept = if available < amount {
+            available
+        } else {
+            amount
+        };
         if swept <= 0 {
             return Ok(0);
         }
         decrease_staked_balance(&env, &asset, swept)?;
         increase_balance(&env, &asset, swept)?;
+        // A sweep that takes NAV to zero has written the stakers off entirely.
+        // Retire their shares here rather than leaving them to dilute whoever
+        // recapitalises the pool next.
+        retire_shares_if_wiped(&env, &asset)?;
         Ok(swept)
     }
 
@@ -394,7 +465,11 @@ impl PerpInsuranceContract {
         total_shares_of(env, asset)
     }
 
-    pub fn pending_unstake(env: Env, asset: Address, staker: Address) -> Option<PendingUnstakeRequest> {
+    pub fn pending_unstake(
+        env: Env,
+        asset: Address,
+        staker: Address,
+    ) -> Option<PendingUnstakeRequest> {
         env.storage()
             .persistent()
             .get(&DataKey::PendingUnstake(asset, staker))
@@ -498,10 +573,46 @@ fn decrease_staked_balance(env: &Env, asset: &Address, amount: i128) -> Result<i
     Ok(next)
 }
 
-fn shares_of(env: Env, asset: Address, staker: Address) -> i128 {
+fn epoch_of(env: &Env, asset: &Address) -> u32 {
     env.storage()
         .persistent()
-        .get(&DataKey::Shares(asset, staker))
+        .get(&DataKey::Epoch(asset.clone()))
+        .unwrap_or(0)
+}
+
+/// Retire every outstanding share when a loss has taken staked NAV to zero.
+///
+/// The condition is exact: zero NAV with shares still outstanding means those
+/// shares have no claim on anything and never will, so leaving them alive would
+/// dilute whoever recapitalises the pool. The last staker withdrawing normally
+/// also drives NAV to zero, but their shares are burned in the same call, so
+/// `total_shares` is zero too and this correctly does nothing.
+fn retire_shares_if_wiped(env: &Env, asset: &Address) -> Result<(), CoreError> {
+    if staked_balance_of(env.clone(), asset.clone()) > 0 {
+        return Ok(());
+    }
+    if total_shares_of(env.clone(), asset.clone()) <= 0 {
+        return Ok(());
+    }
+    let next = epoch_of(env, asset)
+        .checked_add(1)
+        .ok_or(CoreError::MathOverflow)?;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Epoch(asset.clone()), &next);
+    env.storage()
+        .persistent()
+        .remove(&DataKey::TotalShares(asset.clone()));
+    Ok(())
+}
+
+fn shares_of(env: Env, asset: Address, staker: Address) -> i128 {
+    let epoch = epoch_of(&env, &asset);
+    env.storage()
+        .persistent()
+        .get::<DataKey, ShareBalance>(&DataKey::Shares(asset, staker))
+        .filter(|b| b.epoch == epoch)
+        .map(|b| b.shares)
         .unwrap_or(0)
 }
 
@@ -601,6 +712,86 @@ mod tests {
         assert_eq!(minted, 100);
         assert_eq!(s.insurance.total_shares_of(&s.asset), 200);
         assert_eq!(s.insurance.staked_balance_of(&s.asset), 100);
+    }
+
+    /// A pool wiped to zero must not expropriate whoever recapitalises it.
+    ///
+    /// `sweep_to_operating` can take staked NAV to zero while `TotalShares`
+    /// stays positive. Before share epochs, `stake` then minted 1:1 against a
+    /// zero NAV, so the next staker was instantly diluted by shares that could
+    /// never have a claim on anything: depositing 100 into a pool that had held
+    /// 1,000 shares redeemed for about 9. The pool became a trap — it could
+    /// never be recapitalised, because every new deposit was partly seized by
+    /// wiped-out holders.
+    #[test]
+    fn a_wiped_pool_does_not_dilute_the_staker_who_refills_it() {
+        let s = setup();
+
+        let alice = Address::generate(&s.env);
+        fund(&s, &alice, 1_000);
+        s.insurance.stake(&alice, &s.asset, &1_000);
+        assert_eq!(s.insurance.total_shares_of(&s.asset), 1_000);
+
+        // A loss consumes the entire staked pool.
+        s.insurance.sweep_to_operating(&s.asset, &1_000);
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 0);
+
+        // Alice's shares are retired: they have no claim, and saying so is the
+        // point — leaving them alive is what diluted the next staker.
+        assert_eq!(
+            s.insurance.total_shares_of(&s.asset),
+            0,
+            "a wipe must retire the outstanding shares"
+        );
+        assert_eq!(s.insurance.shares_of(&s.asset, &alice), 0);
+
+        // Bob recapitalises and must own the pool outright.
+        let bob = Address::generate(&s.env);
+        fund(&s, &bob, 100);
+        let minted = s.insurance.stake(&bob, &s.asset, &100);
+        assert_eq!(minted, 100);
+        assert_eq!(s.insurance.total_shares_of(&s.asset), 100);
+
+        // Redeeming returns the full deposit, not a fraction of it.
+        s.insurance.request_unstake(&bob, &s.asset, &100);
+        s.env
+            .ledger()
+            .with_mut(|l| l.timestamp += UNSTAKE_COOLDOWN_SECS + 1);
+        assert_eq!(
+            s.insurance.withdraw_unstaked(&bob, &s.asset),
+            100,
+            "the staker who refilled a wiped pool owns all of it"
+        );
+    }
+
+    /// An unstake request that predates a wipe must not reach across it.
+    #[test]
+    fn a_request_from_a_retired_epoch_pays_nothing() {
+        let s = setup();
+
+        let alice = Address::generate(&s.env);
+        fund(&s, &alice, 1_000);
+        s.insurance.stake(&alice, &s.asset, &1_000);
+        s.insurance.request_unstake(&alice, &s.asset, &1_000);
+
+        // The pool is wiped while her request sits in cooldown, then refilled
+        // by someone else.
+        s.insurance.sweep_to_operating(&s.asset, &1_000);
+        let bob = Address::generate(&s.env);
+        fund(&s, &bob, 500);
+        s.insurance.stake(&bob, &s.asset, &500);
+
+        s.env
+            .ledger()
+            .with_mut(|l| l.timestamp += UNSTAKE_COOLDOWN_SECS + 1);
+        assert_eq!(
+            s.insurance.withdraw_unstaked(&alice, &s.asset),
+            0,
+            "a request cannot redeem shares a loss already wrote off"
+        );
+        // Bob's capital is untouched.
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 500);
+        assert_eq!(s.insurance.shares_of(&s.asset, &bob), 500);
     }
 
     #[test]

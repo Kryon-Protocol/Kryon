@@ -383,7 +383,9 @@ impl PerpVaultContract {
     /// window rather than being an instant, unreviewable action.
     pub fn seal_migration(env: Env) -> Result<(), CoreError> {
         require_admin(&env)?;
-        env.storage().instance().set(&DataKey::MigrationSealed, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationSealed, &true);
         Ok(())
     }
 

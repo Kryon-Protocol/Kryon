@@ -318,9 +318,7 @@ impl PerpLiquidationContract {
         // cap has to go through the position's own per-unit pnl rather than
         // the raw execution price.
         let max_size_for_bad_debt = mul_div(bad_debt_before, position.size, unrealized_pnl)?;
-        let effective_close_size = close_size
-            .min(position.size)
-            .min(max_size_for_bad_debt);
+        let effective_close_size = close_size.min(position.size).min(max_size_for_bad_debt);
         if effective_close_size <= 0 {
             return Err(CoreError::NoBadDebtToOffset);
         }
@@ -986,11 +984,15 @@ mod tests {
                 &(100 * PRECISION),
                 &(10 * PRECISION),
             );
-            assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 900 * PRECISION);
+            assert_eq!(
+                s.insurance.bad_debt_of(&s.settlement_asset),
+                900 * PRECISION
+            );
 
             let counterparty_position = s.engine.positions(&counterparty).get(0).unwrap();
             let keeper = Address::generate(&s.env);
-            let counterparty_balance_before = s.vault.balance_of(&counterparty, &s.settlement_asset);
+            let counterparty_balance_before =
+                s.vault.balance_of(&counterparty, &s.settlement_asset);
 
             // Ask to close the whole 100 * PRECISION position — the 900
             // bad-debt cap must bind well before that, at 10 * PRECISION
@@ -1055,7 +1057,7 @@ mod tests {
             let other_position = s.engine.open_position(
                 &other_long,
                 &1,
-                &(1 * PRECISION),
+                &PRECISION,
                 &true,
                 &(100 * PRECISION),
                 &MarginMode::Cross,
@@ -1084,14 +1086,17 @@ mod tests {
                 &(100 * PRECISION),
                 &(10 * PRECISION),
             );
-            assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 900 * PRECISION);
+            assert_eq!(
+                s.insurance.bad_debt_of(&s.settlement_asset),
+                900 * PRECISION
+            );
 
             let keeper = Address::generate(&s.env);
             let result = s.liquidation.try_adl(
                 &keeper,
                 &other_long,
                 &other_position.position_id,
-                &(1 * PRECISION),
+                &PRECISION,
                 &(10 * PRECISION),
             );
             assert_eq!(result, Err(Ok(CoreError::PositionNotInProfit)));
