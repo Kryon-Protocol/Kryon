@@ -18,11 +18,6 @@ import { useTradeSettings } from "@/stores/settings";
 import { Shuffle, X } from "lucide-react";
 
 /* ── Icons ── */
-const CaretIcon = () => (
-  <svg width={10} height={10} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
-    <path d="M3 4.5 L6 7.5 L9 4.5" />
-  </svg>
-);
 const SwapIcon = () => (
   <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
     <path d="M7 7h13l-3-3M17 17H4l3 3" />
@@ -39,55 +34,6 @@ const EditIcon = () => (
     <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
   </svg>
 );
-
-/* ── Margin mode popover ── */
-function MarginPop({
-  margin,
-  setMargin,
-  close,
-}: {
-  margin: "Cross" | "Isolated";
-  setMargin: (v: "Cross" | "Isolated") => void;
-  close: () => void;
-}) {
-  const opts: Array<["Cross" | "Isolated", string]> = [
-    ["Cross", "All Cross positions share the same Cross Margin balance."],
-    ["Isolated", "Manage risk on positions individually by allocating a specific margin amount to each position."],
-  ];
-
-  return (
-    <div
-      className="absolute right-4 top-4 w-[300px] rounded-[12px] border border-[#475569] p-[14px] z-50"
-      style={{ background: "#1c1c20", boxShadow: "0 20px 40px rgba(0,0,0,.6)" }}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div className="px-[6px] pb-3 font-semibold text-[#f5f5f5]">Margin Mode</div>
-      {opts.map(([t, d]) => (
-        <div
-          key={t}
-          onClick={() => { setMargin(t); close(); }}
-          className={`flex items-start gap-3 p-3 rounded-[8px] cursor-pointer border transition-colors ${
-            margin === t
-              ? "bg-[#212128] border-[#475569]"
-              : "border-transparent hover:bg-[#212128]"
-          }`}
-        >
-          <div
-            className={`w-[14px] h-[14px] rounded-full border mt-[3px] grid place-items-center shrink-0 ${
-              margin === t ? "border-[#f4f4f4]" : "border-[#475569]"
-            }`}
-          >
-            {margin === t && <div className="w-[6px] h-[6px] rounded-full bg-[#f4f4f4]" />}
-          </div>
-          <div>
-            <div className="font-medium text-[#f5f5f5] mb-0.5">{t}</div>
-            <div className="text-[12px] text-[#a3a3a3] leading-[1.5]">{d}</div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* ── Main OrderEntry ── */
 export function OrderEntry({
@@ -133,11 +79,9 @@ export function OrderEntry({
     return parts.length > 2 ? parts[0] + "." + parts.slice(1).join("") : cleaned;
   };
   const [leverage, setLeverage] = useState(15);
-  const [margin, setMargin] = useState<"Cross" | "Isolated">("Cross");
   const [reduce, setReduce] = useState(false);
   const [post, setPost] = useState(false);
   const [tpsl, setTpsl] = useState(false);
-  const [marOpen, setMarOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fastPoll, setFastPoll] = useState(false);
 
@@ -148,14 +92,6 @@ export function OrderEntry({
   const levMarks = [1, 2, 5, 10, 25, 50, maxLev].filter(
     (v, i, arr) => v >= 1 && v <= maxLev && arr.indexOf(v) === i
   );
-
-  // Close the margin-mode popover on outside click
-  useEffect(() => {
-    if (!marOpen) return;
-    function onDoc() { setMarOpen(false); }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [marOpen]);
 
   // Picking a price in the order book / trades feed loads it as a limit price.
   useEffect(() => {
@@ -365,7 +301,6 @@ export function OrderEntry({
 
   const rowCls = "flex justify-between items-center text-[12px] text-[#a3a3a3]";
   const valCls = "text-[#737373] font-mono";
-  const showMarginMode = false;
   const showTpSl = false;
   // Degen mode: kept in code but hidden for v1 — its old 500x cap exceeded the
   // on-chain max leverage, so the toggle only misled users.
@@ -374,16 +309,6 @@ export function OrderEntry({
   return (
     <div className="relative flex flex-col">
       <div className="flex flex-col gap-[10px] p-3">
-        {/* Margin mode: kept in code but hidden until isolated/cross modes are functional. */}
-        {showMarginMode && (
-          <button
-            className="flex items-center justify-center gap-2 px-4 py-[13px] rounded-[9px] bg-[#212128] border border-[#334155] hover:border-[#475569] transition-colors text-[13px] font-medium text-[#f5f5f5]"
-            onClick={(e) => { e.stopPropagation(); setMarOpen(true); }}
-          >
-            {margin} <CaretIcon />
-          </button>
-        )}
-
         {/* Long / Short */}
         <div className="grid grid-cols-2 rounded-[9px] overflow-hidden bg-[#212128] border border-[#334155]">
           <button
@@ -679,14 +604,6 @@ export function OrderEntry({
         </div>
       </div>
 
-      {/* Margin-mode popover */}
-      {showMarginMode && marOpen && (
-        <MarginPop
-          margin={margin}
-          setMargin={setMargin}
-          close={() => setMarOpen(false)}
-        />
-      )}
       {degenPromptOpen && (
         <DegenModeModal
           onCancel={() => setDegenPromptOpen(false)}

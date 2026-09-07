@@ -1,10 +1,10 @@
 #![no_std]
 #![deny(unsafe_code)]
 
-use protocol_core::{apply_bps, CoreError};
+use protocol_core::{apply_bps, mul_div, signed_position_pnl, CoreError, Position};
 use risk_engine::AccountHealth;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol,
+    contract, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 #[contracttype]
@@ -30,6 +30,18 @@ pub struct LiquidationReceipt {
     pub reward: i128,
     pub health_before: AccountHealth,
     pub health_after: AccountHealth,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdlReceipt {
+    pub counterparty: Address,
+    pub keeper: Address,
+    pub position_id: u64,
+    pub close_size: i128,
+    pub realized_pnl: i128,
+    pub bad_debt_before: i128,
+    pub bad_debt_after: i128,
 }
 
 #[contracttype]
@@ -248,6 +260,100 @@ impl PerpLiquidationContract {
             health_after,
         })
     }
+
+    /// Auto-deleveraging: force-close part of an in-profit counterparty's
+    /// position to pay down insurance's recorded bad debt.
+    ///
+    /// KRY-Q4. `liquidate` closes only the distressed side — the winning
+    /// counterparty is never looked up, so the insurance fund is the
+    /// protocol's implicit counterparty of last resort. `set_oi_policy`
+    /// bounds how much NEW risk the fund can be exposed to, but does nothing
+    /// once a shortfall has already happened. Positions are stored only per
+    /// account (no global index), so there is no way to verify on-chain that
+    /// `counterparty` is the globally "best" (most profitable, most levered)
+    /// target — the two checks below are what CAN be verified per-position,
+    /// without needing one:
+    ///
+    ///   1. `counterparty`'s position must be in profit at `execution_price`
+    ///      right now. ADL can only ever take from a winner, never touch an
+    ///      account with nothing to give.
+    ///   2. The close size is capped so the realized pnl paid out can never
+    ///      exceed the fund's actual recorded shortfall — a wrong or
+    ///      malicious keeper target costs at most one bounded call, not a
+    ///      drain on a healthy account.
+    ///
+    /// Callable by anyone, like `liquidate` — the safety comes from the two
+    /// on-chain checks above, not from restricting who may call. Refused
+    /// entirely while there is no recorded bad debt: this is a response to an
+    /// already-materialised shortfall, not a speculative risk control.
+    pub fn adl(
+        env: Env,
+        keeper: Address,
+        counterparty: Address,
+        position_id: u64,
+        close_size: i128,
+        execution_price: i128,
+    ) -> Result<AdlReceipt, CoreError> {
+        keeper.require_auth();
+        if close_size <= 0 || execution_price <= 0 {
+            return Err(CoreError::InvalidAmount);
+        }
+
+        let settlement_asset = settlement_asset(&env)?;
+        let bad_debt_before = insurance_bad_debt_of(&env, &settlement_asset)?;
+        if bad_debt_before <= 0 {
+            return Err(CoreError::NoBadDebtToOffset);
+        }
+
+        let position = engine_find_position(&env, &counterparty, position_id)?;
+        let unrealized_pnl = signed_position_pnl(&position, execution_price)?;
+        if unrealized_pnl <= 0 {
+            return Err(CoreError::PositionNotInProfit);
+        }
+
+        // Cap the close size at what the current shortfall can actually
+        // absorb, so ADL never pays out more than the fund is short by —
+        // whatever the keeper requested or however large the position is.
+        // Pnl scales with size * (price - entry), not size * price, so the
+        // cap has to go through the position's own per-unit pnl rather than
+        // the raw execution price.
+        let max_size_for_bad_debt = mul_div(bad_debt_before, position.size, unrealized_pnl)?;
+        let effective_close_size = close_size
+            .min(position.size)
+            .min(max_size_for_bad_debt);
+        if effective_close_size <= 0 {
+            return Err(CoreError::NoBadDebtToOffset);
+        }
+
+        let trade = engine_liquidate_reduce(
+            &env,
+            &counterparty,
+            position_id,
+            effective_close_size,
+            execution_price,
+        )?;
+
+        // The realized gain just credited to the counterparty is exactly the
+        // amount of previously-PENDING shortfall that has now been PAID —
+        // clear it here so it is not counted both as recorded bad debt and as
+        // a real credit sitting in the counterparty's vault balance.
+        let offset = trade.realized_pnl.max(0).min(bad_debt_before);
+        let bad_debt_after = if offset > 0 {
+            insurance_reduce_bad_debt(&env, &settlement_asset, offset)?
+        } else {
+            bad_debt_before
+        };
+
+        Ok(AdlReceipt {
+            counterparty,
+            keeper,
+            position_id,
+            close_size: effective_close_size,
+            realized_pnl: trade.realized_pnl,
+            bad_debt_before,
+            bad_debt_after,
+        })
+    }
 }
 
 fn engine_address(env: &Env) -> Result<Address, CoreError> {
@@ -336,6 +442,25 @@ fn engine_liquidate_reduce(
     )
 }
 
+fn engine_positions(env: &Env, user: &Address) -> Result<Vec<Position>, CoreError> {
+    Ok(env.invoke_contract::<Vec<Position>>(
+        &engine_address(env)?,
+        &Symbol::new(env, "positions"),
+        vec![env, user.into_val(env)],
+    ))
+}
+
+fn engine_find_position(
+    env: &Env,
+    user: &Address,
+    position_id: u64,
+) -> Result<Position, CoreError> {
+    engine_positions(env, user)?
+        .iter()
+        .find(|p| p.position_id == position_id)
+        .ok_or(CoreError::PositionNotFound)
+}
+
 fn insurance_pay_liquidator(
     env: &Env,
     liquidator: &Address,
@@ -351,6 +476,22 @@ fn insurance_pay_liquidator(
             asset.into_val(env),
             amount.into_val(env),
         ],
+    )
+}
+
+fn insurance_bad_debt_of(env: &Env, asset: &Address) -> Result<i128, CoreError> {
+    Ok(env.invoke_contract::<i128>(
+        &insurance_address(env)?,
+        &Symbol::new(env, "bad_debt_of"),
+        vec![env, asset.into_val(env)],
+    ))
+}
+
+fn insurance_reduce_bad_debt(env: &Env, asset: &Address, amount: i128) -> Result<i128, CoreError> {
+    env.invoke_contract::<Result<i128, CoreError>>(
+        &insurance_address(env)?,
+        &Symbol::new(env, "reduce_bad_debt"),
+        vec![env, asset.into_val(env), amount.into_val(env)],
     )
 }
 
@@ -783,5 +924,177 @@ mod tests {
         );
         assert_eq!(s.vault.balance_of(&s.user, &s.settlement_asset), 0);
         assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 0);
+    }
+
+    /// KRY-Q4: `liquidate` never touches the winning counterparty, so a
+    /// shortfall the fund cannot fully cover just sits as recorded bad debt
+    /// forever. These tests cover `adl`, the mechanism that pays it down by
+    /// force-closing part of an in-profit counterparty's position instead.
+    mod adl {
+        use super::*;
+
+        /// Deposits, opens a short on market 1, and returns the address —
+        /// the counterparty on the other side of `s.user`'s long.
+        fn open_short_counterparty(s: &Setup, size: i128, entry_price: i128) -> Address {
+            let counterparty = Address::generate(&s.env);
+            token::StellarAssetClient::new(&s.env, &s.settlement_asset)
+                .mint(&counterparty, &(1_000 * PRECISION));
+            s.vault
+                .deposit(&counterparty, &s.settlement_asset, &(1_000 * PRECISION));
+            s.engine.open_position(
+                &counterparty,
+                &1,
+                &size,
+                &false,
+                &entry_price,
+                &MarginMode::Cross,
+            );
+            counterparty
+        }
+
+        #[test]
+        fn adl_pays_down_bad_debt_from_an_in_profit_counterparty() {
+            let s = setup();
+            // Re-fund insurance so the liquidation below leaves an exact,
+            // hand-checkable 900 * PRECISION of bad debt: deficit 8_000, minus
+            // reward 5, minus the 7_100 the fund can still cover.
+            s.insurance
+                .deposit(&s.user, &s.settlement_asset, &(6_105 * PRECISION)); // 1_000 (setup) + 6_105 = 7_105
+
+            let counterparty = open_short_counterparty(&s, 100 * PRECISION, 100 * PRECISION);
+            let opened = s.engine.open_position(
+                &s.user,
+                &1,
+                &(100 * PRECISION),
+                &true,
+                &(100 * PRECISION),
+                &MarginMode::Cross,
+            );
+            s.env.ledger().with_mut(|l| l.timestamp += 1);
+            s.oracle.write_price(
+                &Symbol::new(&s.env, "BTC"),
+                &s.publisher,
+                &(10 * PRECISION),
+                &(PRECISION / 100),
+                &s.env.ledger().timestamp(),
+            );
+
+            s.liquidation.liquidate(
+                &s.liquidator,
+                &s.user,
+                &opened.position_id,
+                &(100 * PRECISION),
+                &(10 * PRECISION),
+            );
+            assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 900 * PRECISION);
+
+            let counterparty_position = s.engine.positions(&counterparty).get(0).unwrap();
+            let keeper = Address::generate(&s.env);
+            let counterparty_balance_before = s.vault.balance_of(&counterparty, &s.settlement_asset);
+
+            // Ask to close the whole 100 * PRECISION position — the 900
+            // bad-debt cap must bind well before that, at 10 * PRECISION
+            // (10 * 90 price-delta = 900, exactly the shortfall).
+            let receipt = s.liquidation.adl(
+                &keeper,
+                &counterparty,
+                &counterparty_position.position_id,
+                &(100 * PRECISION),
+                &(10 * PRECISION),
+            );
+
+            assert_eq!(receipt.close_size, 10 * PRECISION);
+            assert_eq!(receipt.realized_pnl, 900 * PRECISION);
+            assert_eq!(receipt.bad_debt_before, 900 * PRECISION);
+            assert_eq!(receipt.bad_debt_after, 0);
+            assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 0);
+
+            // Only the capped amount was closed — 90 of the original 100
+            // remains open, still carrying the rest of the profit.
+            assert_eq!(
+                s.engine.positions(&counterparty).get(0).unwrap().size,
+                90 * PRECISION
+            );
+            assert_eq!(
+                s.vault.balance_of(&counterparty, &s.settlement_asset),
+                counterparty_balance_before + 900 * PRECISION
+            );
+        }
+
+        #[test]
+        fn adl_is_refused_without_recorded_bad_debt() {
+            let s = setup(); // fully solvent, no liquidation has happened
+            let counterparty = open_short_counterparty(&s, 10 * PRECISION, 100 * PRECISION);
+            let position = s.engine.positions(&counterparty).get(0).unwrap();
+            let keeper = Address::generate(&s.env);
+
+            let result = s.liquidation.try_adl(
+                &keeper,
+                &counterparty,
+                &position.position_id,
+                &(10 * PRECISION),
+                &(100 * PRECISION),
+            );
+            assert_eq!(result, Err(Ok(CoreError::NoBadDebtToOffset)));
+        }
+
+        #[test]
+        fn adl_refuses_a_counterparty_that_is_not_in_profit() {
+            let s = setup();
+            s.insurance
+                .deposit(&s.user, &s.settlement_asset, &(6_105 * PRECISION));
+
+            // A second long, same side as the distressed user — it is
+            // underwater at the very price the distressed user is
+            // liquidated at, so it is exactly the wrong ADL target.
+            let other_long = Address::generate(&s.env);
+            token::StellarAssetClient::new(&s.env, &s.settlement_asset)
+                .mint(&other_long, &(1_000 * PRECISION));
+            s.vault
+                .deposit(&other_long, &s.settlement_asset, &(1_000 * PRECISION));
+            let other_position = s.engine.open_position(
+                &other_long,
+                &1,
+                &(1 * PRECISION),
+                &true,
+                &(100 * PRECISION),
+                &MarginMode::Cross,
+            );
+
+            let opened = s.engine.open_position(
+                &s.user,
+                &1,
+                &(100 * PRECISION),
+                &true,
+                &(100 * PRECISION),
+                &MarginMode::Cross,
+            );
+            s.env.ledger().with_mut(|l| l.timestamp += 1);
+            s.oracle.write_price(
+                &Symbol::new(&s.env, "BTC"),
+                &s.publisher,
+                &(10 * PRECISION),
+                &(PRECISION / 100),
+                &s.env.ledger().timestamp(),
+            );
+            s.liquidation.liquidate(
+                &s.liquidator,
+                &s.user,
+                &opened.position_id,
+                &(100 * PRECISION),
+                &(10 * PRECISION),
+            );
+            assert_eq!(s.insurance.bad_debt_of(&s.settlement_asset), 900 * PRECISION);
+
+            let keeper = Address::generate(&s.env);
+            let result = s.liquidation.try_adl(
+                &keeper,
+                &other_long,
+                &other_position.position_id,
+                &(1 * PRECISION),
+                &(10 * PRECISION),
+            );
+            assert_eq!(result, Err(Ok(CoreError::PositionNotInProfit)));
+        }
     }
 }

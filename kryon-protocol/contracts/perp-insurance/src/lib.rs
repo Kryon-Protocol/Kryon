@@ -1,8 +1,16 @@
 #![no_std]
 #![deny(unsafe_code)]
 
-use protocol_core::{checked_add, checked_sub, CoreError};
+use protocol_core::{checked_add, checked_sub, mul_div, CoreError, PRECISION};
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
+
+/// How long a staker must wait between requesting an unstake and actually
+/// withdrawing. Without this, a staker who sees a liquidation (and the
+/// governance sweep it might trigger) coming could unstake and withdraw in
+/// the same transaction, exiting before absorbing any loss — exactly the
+/// front-running problem every insurance-fund staking design has to guard
+/// against.
+pub const UNSTAKE_COOLDOWN_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,6 +21,26 @@ pub enum DataKey {
     Vault,
     Balance(Address),
     BadDebt(Address),
+    /// Staked capital, tracked separately from `Balance` — the plain
+    /// donation/operating pool that `pay_liquidator` and `cover_deficit`
+    /// already draw from. Kept apart so a staker's claim can never include
+    /// capital they never contributed (see `stake`), and so liquidation
+    /// payouts can never silently draw down staked capital without the
+    /// deliberate, visible `sweep_to_operating` action.
+    StakedBalance(Address),
+    /// (asset, staker) -> shares outstanding for that staker.
+    Shares(Address, Address),
+    /// asset -> total shares outstanding, the denominator for share pricing.
+    TotalShares(Address),
+    /// (asset, staker) -> a requested-but-not-yet-withdrawn unstake.
+    PendingUnstake(Address, Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUnstakeRequest {
+    pub shares: i128,
+    pub unlock_time: u64,
 }
 
 #[contract]
@@ -167,12 +195,223 @@ impl PerpInsuranceContract {
         Ok(next)
     }
 
+    /// Offset recorded bad debt once it has been paid out through
+    /// auto-deleveraging rather than left as a pending shortfall.
+    ///
+    /// `record_bad_debt` tracks a loss that has already happened but not yet
+    /// been realised against anyone — the winning counterparty's matching
+    /// gain is still unrealised, so nothing has actually been paid out of
+    /// vault reserves for it yet. `adl` (on the liquidation contract) forces
+    /// that realisation early and in a bounded amount instead of leaving it to
+    /// surface later as whichever depositor tries to withdraw last; once paid,
+    /// the shortfall is no longer PENDING; it is now embedded directly in the
+    /// vault's reserves. Leaving it recorded here too would double-count the
+    /// same shortfall as both "pending" and "paid" — so it is cleared here as
+    /// ADL actually pays it out. Never goes negative: reducing by more than is
+    /// recorded simply clears it to zero rather than erroring, since the
+    /// caller may be offsetting against a slightly stale read.
+    ///
+    /// Gated the same as `pay_liquidator`: only the contract already trusted
+    /// to move insurance funds during liquidation-adjacent actions may call.
+    pub fn reduce_bad_debt(env: Env, asset: Address, amount: i128) -> Result<i128, CoreError> {
+        require_liquidation(&env)?;
+        if amount <= 0 {
+            return Err(CoreError::InvalidAmount);
+        }
+        let current = bad_debt_of(env.clone(), asset.clone());
+        let next = core::cmp::max(0, checked_sub(current, amount)?);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BadDebt(asset), &next);
+        Ok(next)
+    }
+
     pub fn balance_of(env: Env, asset: Address) -> i128 {
         balance_of(env, asset)
     }
 
     pub fn bad_debt_of(env: Env, asset: Address) -> i128 {
         bad_debt_of(env, asset)
+    }
+
+    /// Deposit into the staked pool and mint shares priced against it.
+    ///
+    /// KRY-Q4 backstop. Unlike `deposit` (a one-way donation with no claim
+    /// back), staked capital is redeemable — its value moves with
+    /// `staked_balance_of`, which only ever changes via a `stake`/
+    /// `withdraw_unstaked` pair or an explicit `sweep_to_operating`. Shares
+    /// are priced against `StakedBalance` alone, never `Balance` — pricing
+    /// them against the shared operating pool would let the first staker
+    /// walk away with every donation made before any shares existed, since
+    /// there would be no existing share supply to price that capital against.
+    pub fn stake(env: Env, staker: Address, asset: Address, amount: i128) -> Result<i128, CoreError> {
+        staker.require_auth();
+        if amount <= 0 {
+            return Err(CoreError::InvalidAmount);
+        }
+        let nav_before = staked_balance_of(env.clone(), asset.clone());
+        let total_shares = total_shares_of(env.clone(), asset.clone());
+
+        let insurance = env.current_contract_address();
+        token::Client::new(&env, &asset).transfer(&staker, &insurance, &amount);
+        increase_staked_balance(&env, &asset, amount)?;
+
+        let minted = if total_shares <= 0 || nav_before <= 0 {
+            amount
+        } else {
+            mul_div(amount, total_shares, nav_before)?
+        };
+        let next_shares = checked_add(shares_of(env.clone(), asset.clone(), staker.clone()), minted)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shares(asset.clone(), staker.clone()), &next_shares);
+        let next_total = checked_add(total_shares, minted)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalShares(asset), &next_total);
+        Ok(minted)
+    }
+
+    /// Start the cooldown on redeeming `shares`. Only one request may be
+    /// outstanding per staker per asset at a time — withdraw or let the
+    /// existing one lapse before requesting again.
+    pub fn request_unstake(
+        env: Env,
+        staker: Address,
+        asset: Address,
+        shares: i128,
+    ) -> Result<u64, CoreError> {
+        staker.require_auth();
+        if shares <= 0 {
+            return Err(CoreError::InvalidAmount);
+        }
+        if shares > shares_of(env.clone(), asset.clone(), staker.clone()) {
+            return Err(CoreError::InsufficientCollateral);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingUnstake(asset.clone(), staker.clone()))
+        {
+            return Err(CoreError::InvalidConfig);
+        }
+        let unlock_time = env.ledger().timestamp() + UNSTAKE_COOLDOWN_SECS;
+        env.storage().persistent().set(
+            &DataKey::PendingUnstake(asset, staker),
+            &PendingUnstakeRequest { shares, unlock_time },
+        );
+        Ok(unlock_time)
+    }
+
+    /// Redeem a matured unstake request at the CURRENT share price — not the
+    /// price at request time, so a staker who requested before a
+    /// `sweep_to_operating` still absorbs their share of that loss rather
+    /// than dodging it by having requested first.
+    pub fn withdraw_unstaked(env: Env, staker: Address, asset: Address) -> Result<i128, CoreError> {
+        staker.require_auth();
+        let request: PendingUnstakeRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingUnstake(asset.clone(), staker.clone()))
+            .ok_or(CoreError::InvalidConfig)?;
+        if env.ledger().timestamp() < request.unlock_time {
+            return Err(CoreError::InvalidConfig);
+        }
+
+        let total_shares = total_shares_of(env.clone(), asset.clone());
+        let nav = staked_balance_of(env.clone(), asset.clone());
+        let payout = if total_shares <= 0 {
+            0
+        } else {
+            mul_div(request.shares, nav, total_shares)?.min(nav)
+        };
+
+        if payout > 0 {
+            decrease_staked_balance(&env, &asset, payout)?;
+            let insurance = env.current_contract_address();
+            token::Client::new(&env, &asset).transfer(&insurance, &staker, &payout);
+        }
+
+        let remaining_shares = checked_sub(shares_of(env.clone(), asset.clone(), staker.clone()), request.shares)?;
+        if remaining_shares <= 0 {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Shares(asset.clone(), staker.clone()));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Shares(asset.clone(), staker.clone()), &remaining_shares);
+        }
+        let remaining_total = checked_sub(total_shares, request.shares)?;
+        if remaining_total <= 0 {
+            env.storage().persistent().remove(&DataKey::TotalShares(asset.clone()));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalShares(asset.clone()), &remaining_total);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingUnstake(asset, staker));
+        Ok(payout)
+    }
+
+    /// Move staked capital into the operating pool that `pay_liquidator` and
+    /// `cover_deficit` draw from — the moment stakers actually absorb a loss.
+    ///
+    /// Deliberately a separate, explicit, admin-gated action rather than an
+    /// automatic draw from `liquidate`/`absorb_bad_debt`: those are among the
+    /// most sensitive, already-hardened paths in the protocol (C1, KRY-Q4),
+    /// and wiring a new capital source directly into them is exactly the kind
+    /// of change that turns into the next incident if rushed. In production
+    /// the admin MUST be the governance timelock, so a sweep inherits its
+    /// delay and cancellation window — stakers get advance notice, not a
+    /// silent draw-down.
+    pub fn sweep_to_operating(env: Env, asset: Address, amount: i128) -> Result<i128, CoreError> {
+        require_admin(&env)?;
+        if amount <= 0 {
+            return Err(CoreError::InvalidAmount);
+        }
+        let available = staked_balance_of(env.clone(), asset.clone());
+        let swept = if available < amount { available } else { amount };
+        if swept <= 0 {
+            return Ok(0);
+        }
+        decrease_staked_balance(&env, &asset, swept)?;
+        increase_balance(&env, &asset, swept)?;
+        Ok(swept)
+    }
+
+    pub fn staked_balance_of(env: Env, asset: Address) -> i128 {
+        staked_balance_of(env, asset)
+    }
+
+    pub fn shares_of(env: Env, asset: Address, staker: Address) -> i128 {
+        shares_of(env, asset, staker)
+    }
+
+    pub fn total_shares_of(env: Env, asset: Address) -> i128 {
+        total_shares_of(env, asset)
+    }
+
+    pub fn pending_unstake(env: Env, asset: Address, staker: Address) -> Option<PendingUnstakeRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingUnstake(asset, staker))
+    }
+
+    /// Current redemption value of one share, in the asset's own units
+    /// scaled by `PRECISION` — e.g. `PRECISION` itself means 1:1. Readable so
+    /// a staker (or the UI) can see the effect of a sweep before deciding
+    /// whether to stake or unstake, the same way `insurance_coverage_bps`
+    /// makes the OI cap's real bite visible on the engine.
+    pub fn share_price(env: Env, asset: Address) -> i128 {
+        let total_shares = total_shares_of(env.clone(), asset.clone());
+        if total_shares <= 0 {
+            return PRECISION;
+        }
+        let nav = staked_balance_of(env.clone(), asset.clone());
+        mul_div(nav, PRECISION, total_shares).unwrap_or(0)
     }
 }
 
@@ -234,4 +473,199 @@ fn decrease_balance(env: &Env, asset: &Address, amount: i128) -> Result<i128, Co
         .persistent()
         .set(&DataKey::Balance(asset.clone()), &next);
     Ok(next)
+}
+
+fn staked_balance_of(env: Env, asset: Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StakedBalance(asset))
+        .unwrap_or(0)
+}
+
+fn increase_staked_balance(env: &Env, asset: &Address, amount: i128) -> Result<i128, CoreError> {
+    let next = checked_add(staked_balance_of(env.clone(), asset.clone()), amount)?;
+    env.storage()
+        .persistent()
+        .set(&DataKey::StakedBalance(asset.clone()), &next);
+    Ok(next)
+}
+
+fn decrease_staked_balance(env: &Env, asset: &Address, amount: i128) -> Result<i128, CoreError> {
+    let next = checked_sub(staked_balance_of(env.clone(), asset.clone()), amount)?;
+    env.storage()
+        .persistent()
+        .set(&DataKey::StakedBalance(asset.clone()), &next);
+    Ok(next)
+}
+
+fn shares_of(env: Env, asset: Address, staker: Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Shares(asset, staker))
+        .unwrap_or(0)
+}
+
+fn total_shares_of(env: Env, asset: Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TotalShares(asset))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token, Address, Env,
+    };
+
+    struct Setup<'a> {
+        env: Env,
+        admin: Address,
+        asset: Address,
+        insurance: PerpInsuranceContractClient<'a>,
+    }
+
+    fn setup() -> Setup<'static> {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let liquidation = Address::generate(&env);
+        let asset_admin = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(asset_admin)
+            .address();
+
+        let insurance_id = env.register(PerpInsuranceContract, ());
+        let insurance = PerpInsuranceContractClient::new(&env, &insurance_id);
+        insurance.initialize(&admin, &liquidation);
+        insurance.set_vault(&vault);
+
+        Setup {
+            env,
+            admin,
+            asset,
+            insurance,
+        }
+    }
+
+    fn fund(s: &Setup, who: &Address, amount: i128) {
+        token::StellarAssetClient::new(&s.env, &s.asset).mint(who, &amount);
+    }
+
+    #[test]
+    fn first_staker_gets_shares_1to1_and_cannot_claim_prior_donations() {
+        let s = setup();
+
+        // A plain donation, made before anyone stakes.
+        fund(&s, &s.admin, 1_000);
+        s.insurance.deposit(&s.admin, &s.asset, &1_000);
+
+        // The first staker deposits 100 into the SEPARATE staked pool.
+        let staker = Address::generate(&s.env);
+        fund(&s, &staker, 100);
+        let minted = s.insurance.stake(&staker, &s.asset, &100);
+
+        assert_eq!(minted, 100);
+        assert_eq!(s.insurance.total_shares_of(&s.asset), 100);
+        // Staked NAV is exactly what was staked — the 1_000 donation never
+        // entered this ledger, so it is not claimable via shares.
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 100);
+        assert_eq!(s.insurance.balance_of(&s.asset), 1_000);
+    }
+
+    #[test]
+    fn a_second_staker_is_priced_against_staked_nav_not_donations() {
+        let s = setup();
+        fund(&s, &s.admin, 1_000);
+        s.insurance.deposit(&s.admin, &s.asset, &1_000); // untouchable by stakers
+
+        let alice = Address::generate(&s.env);
+        fund(&s, &alice, 100);
+        s.insurance.stake(&alice, &s.asset, &100);
+
+        // Staked NAV moves from a sweep before Bob stakes: 100 -> 50.
+        s.insurance.sweep_to_operating(&s.asset, &50);
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 50);
+        assert_eq!(s.insurance.balance_of(&s.asset), 1_050);
+
+        // Bob stakes 50 into a pool now worth 50 behind 100 shares — he
+        // should get 100 shares (50 * 100 / 50), matching Alice's price per
+        // share exactly, not the 1:1 rate a naive read of "100 in, 100 out"
+        // would suggest.
+        let bob = Address::generate(&s.env);
+        fund(&s, &bob, 50);
+        let minted = s.insurance.stake(&bob, &s.asset, &50);
+        assert_eq!(minted, 100);
+        assert_eq!(s.insurance.total_shares_of(&s.asset), 200);
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 100);
+    }
+
+    #[test]
+    fn unstake_is_gated_by_cooldown() {
+        let s = setup();
+        let staker = Address::generate(&s.env);
+        fund(&s, &staker, 100);
+        s.insurance.stake(&staker, &s.asset, &100);
+
+        s.insurance.request_unstake(&staker, &s.asset, &100);
+        let too_early = s.insurance.try_withdraw_unstaked(&staker, &s.asset);
+        assert!(too_early.is_err());
+
+        s.env.ledger().with_mut(|l| {
+            l.timestamp += UNSTAKE_COOLDOWN_SECS;
+        });
+        let payout = s.insurance.withdraw_unstaked(&staker, &s.asset);
+        assert_eq!(payout, 100);
+        assert_eq!(s.insurance.total_shares_of(&s.asset), 0);
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 0);
+        assert_eq!(token::Client::new(&s.env, &s.asset).balance(&staker), 100);
+    }
+
+    #[test]
+    fn a_sweep_between_request_and_withdrawal_is_absorbed_by_the_staker() {
+        let s = setup();
+        let staker = Address::generate(&s.env);
+        fund(&s, &staker, 100);
+        s.insurance.stake(&staker, &s.asset, &100);
+        s.insurance.request_unstake(&staker, &s.asset, &100);
+
+        // A sweep happens during the cooldown, halving staked NAV.
+        s.insurance.sweep_to_operating(&s.asset, &50);
+
+        s.env.ledger().with_mut(|l| {
+            l.timestamp += UNSTAKE_COOLDOWN_SECS;
+        });
+        // Priced at withdrawal time, not request time — the staker gets 50,
+        // not the 100 they would have gotten had they escaped the sweep.
+        let payout = s.insurance.withdraw_unstaked(&staker, &s.asset);
+        assert_eq!(payout, 50);
+    }
+
+    #[test]
+    fn sweep_only_moves_what_is_actually_staked() {
+        let s = setup();
+        let staker = Address::generate(&s.env);
+        fund(&s, &staker, 30);
+        s.insurance.stake(&staker, &s.asset, &30);
+
+        let swept = s.insurance.sweep_to_operating(&s.asset, &1_000);
+        assert_eq!(swept, 30);
+        assert_eq!(s.insurance.staked_balance_of(&s.asset), 0);
+        assert_eq!(s.insurance.balance_of(&s.asset), 30);
+    }
+
+    #[test]
+    fn share_price_reflects_a_sweep() {
+        let s = setup();
+        let staker = Address::generate(&s.env);
+        fund(&s, &staker, 100);
+        s.insurance.stake(&staker, &s.asset, &100);
+        assert_eq!(s.insurance.share_price(&s.asset), PRECISION);
+
+        s.insurance.sweep_to_operating(&s.asset, &50);
+        assert_eq!(s.insurance.share_price(&s.asset), PRECISION / 2);
+    }
 }
