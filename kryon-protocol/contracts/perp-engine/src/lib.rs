@@ -54,6 +54,30 @@ pub enum DataKey {
     /// insurance fund's effective balance. Absent = uncapped.
     OiPolicy(u32),
     ShortOpenInterest(u32),
+    /// Running sum of every market's `OiPolicy` bps. Maintained incrementally
+    /// in `set_oi_policy` so the aggregate ceiling below can be enforced
+    /// without enumerating markets (there is no market registry to enumerate).
+    TotalOiPolicyBps,
+    /// KRY-Q11: ceiling on `TotalOiPolicyBps` — the sum of every market's cap,
+    /// in bps of the (single, pooled) insurance fund. Without this, each
+    /// market's cap is checked independently against the same undivided fund,
+    /// so the fund's real aggregate commitment scales with the number of
+    /// markets rather than being bounded by its own size. Absent = uncapped
+    /// (matches `OiPolicy`'s own default, and preserves existing behaviour on
+    /// a deployment that hasn't set it yet).
+    MaxTotalOiPolicyBps,
+    /// Set once a mainnet migration's position import is complete (KRY-Q10).
+    /// `migrate_import_positions` refuses to run once this is set, so a
+    /// redeployment's seed data cannot be replayed or extended after the
+    /// deliberate governance action that closes the migration window.
+    MigrationSealed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigratedPositions {
+    pub user: Address,
+    pub positions: Vec<Position>,
 }
 
 #[contracttype]
@@ -250,6 +274,36 @@ impl PerpEngineContract {
         if market_id == 0 {
             return Err(CoreError::InvalidConfig);
         }
+        let old_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OiPolicy(market_id))
+            .unwrap_or(0);
+
+        // KRY-Q11: the fund is pooled across markets and each market's cap is
+        // checked independently against it (see `require_insurance_headroom`),
+        // so the sum of every market's bps — not any single market's — is what
+        // bounds the fund's real aggregate commitment. Reject a change that
+        // would push that sum past the configured ceiling, if one is set.
+        let total_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalOiPolicyBps)
+            .unwrap_or(0);
+        let new_total_bps = total_bps
+            .checked_sub(old_bps)
+            .and_then(|t| t.checked_add(max_oi_per_insurance_bps))
+            .ok_or(CoreError::MathOverflow)?;
+        if let Some(max_total) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::MaxTotalOiPolicyBps)
+        {
+            if new_total_bps > max_total {
+                return Err(CoreError::AggregateOiPolicyExceeded);
+            }
+        }
+
         if max_oi_per_insurance_bps == 0 {
             env.storage()
                 .persistent()
@@ -259,6 +313,13 @@ impl PerpEngineContract {
                 .persistent()
                 .set(&DataKey::OiPolicy(market_id), &max_oi_per_insurance_bps);
         }
+        if new_total_bps == 0 {
+            env.storage().persistent().remove(&DataKey::TotalOiPolicyBps);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalOiPolicyBps, &new_total_bps);
+        }
         Ok(())
     }
 
@@ -266,6 +327,38 @@ impl PerpEngineContract {
         env.storage()
             .persistent()
             .get(&DataKey::OiPolicy(market_id))
+    }
+
+    /// Sum of every market's `OiPolicy` bps — the fund's real aggregate
+    /// commitment, since the fund is pooled rather than partitioned per market.
+    pub fn total_oi_policy_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalOiPolicyBps)
+            .unwrap_or(0)
+    }
+
+    /// Ceiling on `total_oi_policy_bps`. Absent = uncapped (the aggregate
+    /// check is opt-in, matching `OiPolicy` itself defaulting to uncapped).
+    /// `0` clears the ceiling.
+    pub fn set_max_total_oi_policy_bps(env: Env, max_total_bps: u32) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        if max_total_bps == 0 {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::MaxTotalOiPolicyBps);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MaxTotalOiPolicyBps, &max_total_bps);
+        }
+        Ok(())
+    }
+
+    pub fn max_total_oi_policy_bps(env: Env) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MaxTotalOiPolicyBps)
     }
 
     /// How well the insurance fund currently covers this market's open
@@ -344,6 +437,75 @@ impl PerpEngineContract {
             .instance()
             .set(&DataKey::Insurance, &insurance);
         Ok(())
+    }
+
+    /// Seed a freshly deployed engine's positions and open interest from an
+    /// export of a frozen, unupgradeable deployment (KRY-Q10). Every mainnet
+    /// contract predates `upgrade()` and can never be given it, so a real
+    /// migration means new contracts plus a one-time import of old state —
+    /// this is that import, for positions.
+    ///
+    /// Callable repeatedly, in batches, until `seal_migration` closes the
+    /// window: an export of every account can rarely fit in one transaction,
+    /// and re-running with a corrected batch should not require a redeploy.
+    /// Advances `NextPositionId` past every imported id so a position opened
+    /// after migration can never collide with an imported one.
+    ///
+    /// Also mirrors each imported user's positions into the vault via
+    /// `sync_positions` — the vault keeps its own copy for `account_health`,
+    /// normally kept current by every trade calling back into it, which a
+    /// direct storage seed here would otherwise leave stale. Collateral
+    /// balances themselves are seeded separately, by
+    /// `perp-vault::migrate_import_balances` — a balance and a position are
+    /// exported from different contracts and don't need to travel together.
+    pub fn migrate_import_positions(
+        env: Env,
+        entries: Vec<MigratedPositions>,
+    ) -> Result<u32, CoreError> {
+        require_admin(&env)?;
+        if env.storage().instance().has(&DataKey::MigrationSealed) {
+            return Err(CoreError::AlreadyInitialized);
+        }
+        let mut next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextPositionId)
+            .unwrap_or(1);
+        let mut imported = 0u32;
+        for entry in entries.iter() {
+            store_positions(&env, &entry.user, &entry.positions);
+            vault_sync_positions(&env, &entry.user, &entry.positions)?;
+            for position in entry.positions.iter() {
+                let oi = checked_add(open_interest(&env, position.market_id), position.size)?;
+                store_open_interest(&env, position.market_id, oi);
+                let side_oi = checked_add(
+                    side_open_interest(&env, position.market_id, position.is_long),
+                    position.size,
+                )?;
+                store_side_open_interest(&env, position.market_id, position.is_long, side_oi);
+                if position.position_id >= next_id {
+                    next_id = position.position_id + 1;
+                }
+            }
+            imported += 1;
+        }
+        env.storage().instance().set(&DataKey::NextPositionId, &next_id);
+        Ok(imported)
+    }
+
+    /// Close the migration import window for good. Admin-gated like every
+    /// other configuration entrypoint — in production that means the
+    /// governance timelock, so sealing (like everything else admin-gated)
+    /// inherits its delay and cancellation window rather than being an
+    /// instant, unreviewable action.
+    pub fn seal_migration(env: Env) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::MigrationSealed, &true);
+        Ok(())
+    }
+
+    pub fn migration_sealed(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::MigrationSealed)
     }
 
     /// Advance funding for a market from the mark-vs-index premium.
@@ -465,6 +627,16 @@ impl PerpEngineContract {
         require_order_gateway(&env)?;
         if size <= 0 || execution_price <= 0 {
             return Err(CoreError::InvalidAmount);
+        }
+        // KRY-Q5-F: the vault has no separate balance bucket for isolated
+        // margin — a realised isolated loss draws down the same collateral
+        // as a cross position, so "isolated" currently promises a capped
+        // downside it cannot deliver. No live caller requests this mode (the
+        // order gateway always passes Cross), but reject it here too so a
+        // future integration can't silently rely on a guarantee that isn't
+        // implemented.
+        if mode == MarginMode::Isolated {
+            return Err(CoreError::IsolatedMarginDisabled);
         }
         let market = load_market(&env, market_id)?;
         validate_execution_price(&env, &market, execution_price)?;
@@ -1586,6 +1758,53 @@ mod tests {
     }
 
     #[test]
+    fn oi_policy_tracks_the_aggregate_across_markets() {
+        // KRY-Q11: the fund is pooled, so the sum of every market's OiPolicy
+        // bps — not any single market's — is what the fund is really on the
+        // hook for. total_oi_policy_bps must track that sum as markets are
+        // added, updated, and removed.
+        let s = setup();
+        assert_eq!(s.engine.total_oi_policy_bps(), 0);
+
+        s.engine.set_oi_policy(&1, &20_000); // 2x
+        assert_eq!(s.engine.total_oi_policy_bps(), 20_000);
+
+        s.engine.set_oi_policy(&2, &50_000); // 5x
+        assert_eq!(s.engine.total_oi_policy_bps(), 70_000);
+
+        s.engine.set_oi_policy(&1, &10_000); // lowering market 1 to 1x
+        assert_eq!(s.engine.total_oi_policy_bps(), 60_000);
+
+        s.engine.set_oi_policy(&2, &0); // removing market 2 entirely
+        assert_eq!(s.engine.total_oi_policy_bps(), 10_000);
+        assert_eq!(s.engine.oi_policy(&2), None);
+    }
+
+    #[test]
+    fn aggregate_oi_policy_ceiling_rejects_overcommitment() {
+        // Without a ceiling, N markets can each independently claim up to
+        // their own multiple of the SAME pooled fund — the fund's real
+        // aggregate exposure is unbounded even though each market looks
+        // individually capped. set_max_total_oi_policy_bps closes that.
+        let s = setup();
+        s.engine.set_max_total_oi_policy_bps(&30_000); // markets may claim at most 3x the fund, combined
+
+        s.engine.set_oi_policy(&1, &20_000); // 2x — fits under the 3x ceiling
+        assert_eq!(s.engine.total_oi_policy_bps(), 20_000);
+
+        // Market 2 at another 2x would bring the aggregate to 4x, over the
+        // 3x ceiling — must be refused, and must not mutate any state.
+        let result = s.engine.try_set_oi_policy(&2, &20_000);
+        assert_eq!(result, Err(Ok(CoreError::AggregateOiPolicyExceeded)));
+        assert_eq!(s.engine.total_oi_policy_bps(), 20_000);
+        assert_eq!(s.engine.oi_policy(&2), None);
+
+        // Exactly at the ceiling is allowed.
+        s.engine.set_oi_policy(&2, &10_000); // +1x = 3x total, exactly the ceiling
+        assert_eq!(s.engine.total_oi_policy_bps(), 30_000);
+    }
+
+    #[test]
     fn funding_update_is_settled_before_close() {
         let s = setup();
         // Trade 1% rich against the 100 index so there is a premium to fund on.
@@ -1620,12 +1839,14 @@ mod tests {
     }
 
     #[test]
-    fn isolated_position_sets_margin_on_open() {
-        // Open an isolated position: 5 BTC at price 100.
-        // Notional = 5 * 100 = 500. initial_margin_bps = 1000 (10%).
-        // Expected margin = 500 * 1000 / 10000 = 50 PRECISION units.
+    fn isolated_margin_is_rejected_at_open() {
+        // KRY-Q5-F: isolated margin has no separate collateral bucket in the
+        // vault, so a realised isolated loss would draw down the same balance
+        // as a cross position — the isolation the mode promises is not real.
+        // The engine refuses to open one at all rather than let a caller rely
+        // on a guarantee it can't deliver.
         let s = setup();
-        s.engine.open_position(
+        let result = s.engine.try_open_position(
             &s.user,
             &1,
             &(5 * PRECISION),
@@ -1633,49 +1854,77 @@ mod tests {
             &(100 * PRECISION),
             &MarginMode::Isolated,
         );
-        let positions = s.engine.positions(&s.user);
-        assert_eq!(positions.len(), 1);
-        let pos = positions.get(0).unwrap();
-        assert_eq!(pos.mode, MarginMode::Isolated);
-        // notional = 5 * 100 * PRECISION (mul_precision scales), margin = notional * 1000/10000
-        // mul_precision(5*PRECISION, 100*PRECISION) = 5*100*PRECISION = 500*PRECISION
-        // apply_bps(500*PRECISION, 1000) = 500*PRECISION * 1000/10000 = 50*PRECISION
-        assert_eq!(pos.margin, 50 * PRECISION);
+        assert_eq!(result, Err(Ok(CoreError::IsolatedMarginDisabled)));
+        assert_eq!(s.engine.positions(&s.user).len(), 0);
     }
 
-    #[test]
-    fn isolated_margin_does_not_contaminate_cross_health() {
-        // Open an isolated position on market 1 — the underlying will have no pnl (price at entry).
-        // Even though the isolated position has margin locked, the cross health (no cross positions)
-        // should still be valid (free collateral for cross = 1000 - locked_isolated_margin = 950).
-        // The test confirms that cross positions can be opened concurrently with isolated ones
-        // without the isolated margin being treated as available cross collateral.
-        let s = setup();
+    mod migration {
+        use super::*;
 
-        // Open isolated: 5 BTC at 100 → margin = 50 * PRECISION locked
-        s.engine.open_position(
-            &s.user,
-            &1,
-            &(5 * PRECISION),
-            &true,
-            &(100 * PRECISION),
-            &MarginMode::Isolated,
-        );
-        let positions = s.engine.positions(&s.user);
-        assert_eq!(positions.len(), 1);
-        let iso_pos = positions.get(0).unwrap();
-        assert_eq!(iso_pos.mode, MarginMode::Isolated);
-        assert_eq!(iso_pos.margin, 50 * PRECISION);
+        #[test]
+        fn migrate_import_positions_seeds_state_and_advances_next_position_id() {
+            let s = setup();
+            let migrated_user = Address::generate(&s.env);
+            let position = Position {
+                position_id: 4_242,
+                owner: migrated_user.clone(),
+                market_id: 1,
+                size: 5 * PRECISION,
+                entry_price: 100 * PRECISION,
+                margin: 0,
+                is_long: true,
+                last_funding_index: 0,
+                mode: MarginMode::Cross,
+            };
 
-        // Vault health: cross collateral = 1000 - 50 = 950.
-        // No cross positions → cross maintenance = 0 → not cross-liquidatable.
-        // Isolated equity = max(0, 50 + 0) = 50 (price at entry, no pnl).
-        // Total equity = 950 + 0 + 50 = 1000. Initial margin req = 50. Healthy.
-        let health = s.vault.account_health(&s.user, &s.settlement_asset);
-        assert!(
-            health.equity > health.initial_margin_required,
-            "account should be healthy after isolated open"
-        );
-        assert!(!health.liquidatable);
+            let imported = s.engine.migrate_import_positions(&Vec::from_array(
+                &s.env,
+                [MigratedPositions {
+                    user: migrated_user.clone(),
+                    positions: Vec::from_array(&s.env, [position.clone()]),
+                }],
+            ));
+
+            assert_eq!(imported, 1);
+            assert_eq!(s.engine.positions(&migrated_user).get(0).unwrap(), position);
+            assert_eq!(s.engine.open_interest(&1), 5 * PRECISION);
+            assert_eq!(s.engine.long_open_interest(&1), 5 * PRECISION);
+
+            // The next position opened anywhere must not collide with the
+            // imported id, even though this engine has otherwise issued none.
+            let opened = s.engine.open_position(
+                &s.user,
+                &1,
+                &PRECISION,
+                &true,
+                &(100 * PRECISION),
+                &MarginMode::Cross,
+            );
+            assert!(opened.position_id > 4_242);
+
+            // The vault's own mirror was updated too, not just the engine's —
+            // otherwise account_health would not see the imported position.
+            let health = s.vault.account_health(&migrated_user, &s.settlement_asset);
+            assert_eq!(health.maintenance_margin_required, 25 * PRECISION); // 5 * 100 * 5%
+        }
+
+        #[test]
+        fn migration_cannot_run_again_once_sealed() {
+            let s = setup();
+            let migrated_user = Address::generate(&s.env);
+            s.engine.migrate_import_positions(&Vec::from_array(&s.env, []));
+            assert!(!s.engine.migration_sealed());
+            s.engine.seal_migration();
+            assert!(s.engine.migration_sealed());
+
+            let result = s.engine.try_migrate_import_positions(&Vec::from_array(
+                &s.env,
+                [MigratedPositions {
+                    user: migrated_user,
+                    positions: Vec::new(&s.env),
+                }],
+            ));
+            assert_eq!(result, Err(Ok(CoreError::AlreadyInitialized)));
+        }
     }
 }

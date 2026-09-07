@@ -46,6 +46,17 @@ pub enum DataKey {
     TotalDeposited(Address),
     /// Keeper permitted to settle settlement-asset debits outside liquidation.
     Operator,
+    /// Set once a mainnet migration's balance import is complete (KRY-Q10).
+    /// `migrate_import_balances` refuses to run once this is set.
+    MigrationSealed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigratedBalance {
+    pub user: Address,
+    pub asset: Address,
+    pub amount: i128,
 }
 
 /// Emitted whenever liquidation reassigns collateral to cover a settlement
@@ -322,6 +333,62 @@ impl PerpVaultContract {
     /// accepts, rather than hardcoding a list that can drift from the chain.
     pub fn collateral(env: Env, asset: Address) -> Option<CollateralConfig> {
         env.storage().persistent().get(&DataKey::Collateral(asset))
+    }
+
+    /// Seed a freshly deployed vault's collateral balances from an export of
+    /// a frozen, unupgradeable deployment (KRY-Q10). Every mainnet contract
+    /// predates `upgrade()` and can never be given it, so a real migration
+    /// means new contracts plus a one-time import of old balances — this is
+    /// that import.
+    ///
+    /// Credits the internal ledger only — it does not move tokens. The real
+    /// tokens backing every imported balance must be deposited into this
+    /// vault's custody as its own step in the migration runbook (e.g. a
+    /// treasury transfer sized to the sum of every export before, or as part
+    /// of, running this), or the internal ledger promises more than the
+    /// vault actually holds the moment this call succeeds. Also updates
+    /// `TotalDeposited` so a per-asset deposit cap set after migration is
+    /// judged against the real starting balance, not zero.
+    ///
+    /// Callable repeatedly, in batches, until `seal_migration` closes the
+    /// window — a full account export rarely fits one transaction.
+    pub fn migrate_import_balances(
+        env: Env,
+        entries: Vec<MigratedBalance>,
+    ) -> Result<u32, CoreError> {
+        require_admin(&env)?;
+        if env.storage().instance().has(&DataKey::MigrationSealed) {
+            return Err(CoreError::AlreadyInitialized);
+        }
+        let mut imported = 0u32;
+        for entry in entries.iter() {
+            if entry.amount == 0 {
+                continue;
+            }
+            increase_balance(&env, &entry.user, &entry.asset, entry.amount)?;
+            record_user_asset(&env, &entry.user, &entry.asset);
+            let total = Self::total_deposited(env.clone(), entry.asset.clone());
+            env.storage().instance().set(
+                &DataKey::TotalDeposited(entry.asset.clone()),
+                &checked_add(total, entry.amount)?,
+            );
+            imported += 1;
+        }
+        Ok(imported)
+    }
+
+    /// Close the balance-import window for good. Admin-gated like every
+    /// other configuration entrypoint — in production that means the
+    /// governance timelock, so sealing inherits its delay and cancellation
+    /// window rather than being an instant, unreviewable action.
+    pub fn seal_migration(env: Env) -> Result<(), CoreError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::MigrationSealed, &true);
+        Ok(())
+    }
+
+    pub fn migration_sealed(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::MigrationSealed)
     }
 
     pub fn set_market_config(env: Env, config: MarketConfig) -> Result<(), CoreError> {
@@ -1568,5 +1635,63 @@ mod tests {
         });
         assert_eq!(vault.balance_of(&user, &btc), 2 * PRECISION);
         assert_eq!(vault.balance_of(&user, &usdc), -10 * PRECISION);
+    }
+
+    #[test]
+    fn migrate_import_balances_credits_the_ledger_and_updates_total_deposited() {
+        let env = Env::default();
+        let (_user, _engine, _publisher, settlement_asset, _oracle_id, vault) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        let imported = vault.migrate_import_balances(&Vec::from_array(
+            &env,
+            [
+                MigratedBalance {
+                    user: alice.clone(),
+                    asset: settlement_asset.clone(),
+                    amount: 500 * PRECISION,
+                },
+                MigratedBalance {
+                    user: bob.clone(),
+                    asset: settlement_asset.clone(),
+                    amount: 250 * PRECISION,
+                },
+            ],
+        ));
+
+        assert_eq!(imported, 2);
+        assert_eq!(vault.balance_of(&alice, &settlement_asset), 500 * PRECISION);
+        assert_eq!(vault.balance_of(&bob, &settlement_asset), 250 * PRECISION);
+        assert_eq!(vault.total_deposited(&settlement_asset), 750 * PRECISION);
+    }
+
+    #[test]
+    fn migration_cannot_run_again_once_sealed() {
+        let env = Env::default();
+        let (_user, _engine, _publisher, settlement_asset, _oracle_id, vault) = setup(&env);
+        let alice = Address::generate(&env);
+
+        vault.migrate_import_balances(&Vec::from_array(
+            &env,
+            [MigratedBalance {
+                user: alice.clone(),
+                asset: settlement_asset.clone(),
+                amount: 100 * PRECISION,
+            }],
+        ));
+        assert!(!vault.migration_sealed());
+        vault.seal_migration();
+        assert!(vault.migration_sealed());
+
+        let result = vault.try_migrate_import_balances(&Vec::from_array(
+            &env,
+            [MigratedBalance {
+                user: alice,
+                asset: settlement_asset,
+                amount: 999 * PRECISION,
+            }],
+        ));
+        assert_eq!(result, Err(Ok(CoreError::AlreadyInitialized)));
     }
 }
