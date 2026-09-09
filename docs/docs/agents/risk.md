@@ -71,8 +71,10 @@ one-way, because a bot that can un-halt itself will, for exactly the reason it
 halted.
 
 **`refuseCrossedBook`** stops your bot chasing a spread that is not takeable.
-A crossed book means resting orders that should have matched and did not,
-usually because their owner cannot settle. It looks like free money and is not.
+A crossed book (bid above ask) or a locked one (bid equal to ask) means resting
+orders that should have matched and did not — because their owner cannot settle,
+or because settlement itself is broken. It looks like free money and is not.
+Both Kryon venues have shown this; see [Going to mainnet](./mainnet).
 
 ## Stale oracles
 

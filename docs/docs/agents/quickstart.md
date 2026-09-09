@@ -55,11 +55,22 @@ console.log(`bid ${book.bestBid} / ask ${book.bestAsk} — mid ${book.mid}`);
 ```
 
 :::warning Check `book.crossed` before you trust a price
-A crossed book — best bid at or above best ask — means orders that should have
-matched and did not, usually because their owner cannot settle them. The
-apparent spread is not takeable. Mainnet's XLM-PERP book has been crossed by
-~11% for this reason. Any strategy deriving a mid, a spread, or a signal from
-the book should check `crossed` first.
+A **crossed** book (best bid above best ask) or a **locked** one (bid equal to
+ask) means orders that should have matched and did not. The apparent spread is
+not takeable, and a bot that chases it just burns its rate limit.
+
+This is not hypothetical on Kryon. Both venues have shown deeply crossed books —
+mainnet XLM-PERP was once crossed by ~11%, with 91 of 99 bid levels above the
+best ask. Two causes, both real:
+
+- **The owner cannot settle.** Order intake checks your signature, not your
+  margin, so an unfunded account can rest a book that never trades.
+- **Settlement itself is failing.** Testnet settled zero trades between launch
+  and 2026-09-06 because the USDC collateral feed was unregistered: every fill
+  matched, failed to settle, and was rolled back, leaving its orders resting.
+
+Any strategy deriving a mid, a spread, or a signal from the book should check
+`crossed` first. The SDK refuses to trade one by default.
 :::
 
 ## Get a testnet account

@@ -36,18 +36,19 @@ should you.
 
 Two things differ materially from testnet, and both will surprise you:
 
-**Only XLM-PERP is live.** The venue advertises 8 markets; 7 of them are not
-registered in the database and return 404. `listMarkets()` returns what is
-really there.
+**Only XLM-PERP is live.** Testnet lists all 8 markets; mainnet has only
+XLM-PERP registered. `listMarkets()` returns what is really there, so trust it
+over any hardcoded list.
 
-**The XLM-PERP book is crossed by around 11%,** with most bid levels sitting
-above the best ask. Those orders belong to accounts that cannot settle them, so
-they rest instead of matching. The spread is not takeable. Keep
-`refuseCrossedBook: true` — the default — unless you have specifically decided
-otherwise.
+**Mainnet is thin, and its book has been badly crossed before.** In September
+2026 XLM-PERP was crossed by ~11%, with 91 of 99 bid levels above the best ask —
+resting orders from accounts that could not settle them. That particular set has
+since expired, but nothing prevents it recurring, so keep
+`refuseCrossedBook: true` (the default).
 
-Mainnet is also thin. Size accordingly, and do not assume you can exit a
-position as fast as you entered it.
+Size accordingly, and do not assume you can exit a position as fast as you
+entered it. Check `listMarkets()` and the book at startup rather than assuming
+depth is there.
 
 ## Operating
 

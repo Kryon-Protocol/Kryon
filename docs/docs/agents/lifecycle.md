@@ -88,4 +88,14 @@ settlement before submitting. An order can fail at that point because:
 
 The second one is the common surprise: **placing orders needs no funds, but
 settling does.** An unfunded account can quote a whole book that will never
-trade. This is why parts of the mainnet book are crossed.
+trade. That is one reason a book ends up crossed.
+
+The other is venue-wide: if settlement is failing for everyone, every fill is
+rolled back and its orders stay resting. Testnet settled zero trades between
+launch and 2026-09-06 for exactly this reason — the USDC collateral feed the
+margin check prices against had never been registered, so every
+`settle_fill_signed` failed and the matcher rolled the fill back. The book
+looked healthy and simply never traded.
+
+The lesson for a bot: **a fill in the trades feed is the only proof anything
+settled.** Orders resting, and even the matcher reporting a match, are not.
